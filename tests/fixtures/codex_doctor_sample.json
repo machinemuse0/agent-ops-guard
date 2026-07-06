@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "overallStatus": "fail",
+  "checks": {
+    "network.provider_reachability": {
+      "id": "network.provider_reachability",
+      "category": "reachability",
+      "status": "fail",
+      "summary": "provider endpoint unreachable",
+      "remediation": "Check proxy."
+    },
+    "terminal.env": {
+      "id": "terminal.env",
+      "category": "terminal",
+      "status": "fail",
+      "summary": "TERM=dumb",
+      "issues": [
+        {
+          "severity": "fail",
+          "cause": "TERM=dumb",
+          "measured": "TERM=dumb",
+          "expected": "TERM=xterm-256color",
+          "remedy": "set TERM"
+        }
+      ]
+    }
+  }
+}

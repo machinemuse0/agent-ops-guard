@@ -1,0 +1,6 @@
+{"type":"session_meta","timestamp":"2026-07-05T00:00:00Z","payload":{"id":"rollout-test","cwd":"/tmp/aicg-demo","cli_version":"0.142.5","source":"vscode","model_provider":"openai"}}
+{"type":"turn_context","timestamp":"2026-07-05T00:00:01Z","payload":{"turn_id":"turn-a","cwd":"/tmp/aicg-demo","model":"gpt-5.5","collaboration_mode":"default"}}
+{"type":"event_msg","timestamp":"2026-07-05T00:00:02Z","payload":{"type":"task_started","turn_id":"turn-a","started_at":"2026-07-05T00:00:02Z","collaboration_mode_kind":"default"}}
+{"type":"response_item","timestamp":"2026-07-05T00:00:03Z","payload":{"type":"function_call","call_id":"call-1","name":"exec_command","arguments":"OPENAI_API_KEY=sk-test012345678901234567890123456789 call https://api.openai.com/v1/responses"}}
+{"type":"response_item","timestamp":"2026-07-05T00:00:04Z","payload":{"type":"function_call_output","call_id":"call-1","output":"ok"}}
+{"type":"event_msg","timestamp":"2026-07-05T00:00:05Z","payload":{"type":"token_count","turn_id":"turn-a","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":100,"output_tokens":250,"reasoning_output_tokens":50,"total_tokens":1300},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":100,"output_tokens":250,"reasoning_output_tokens":50,"total_tokens":1300}}}}

@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"malformed-test","timestamp":"2026-07-04T00:00:00Z"}
+not-json
+{"type":"turn.started","timestamp":"2026-07-04T00:00:01Z"}
+{"type":"turn.completed","timestamp":"2026-07-04T00:00:02Z","usage":{"input_tokens":1,"output_tokens":2}}

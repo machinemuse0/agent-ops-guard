@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"thread-test","timestamp":"2026-07-04T00:00:00Z","model":"gpt-5","project_path":"/tmp/aicg-demo"}
+{"type":"turn.started","timestamp":"2026-07-04T00:00:01Z","model":"gpt-5"}
+{"type":"item.started","timestamp":"2026-07-04T00:00:02Z","item":{"id":"item-1","type":"command_execution","name":"shell"}}
+{"type":"item.completed","timestamp":"2026-07-04T00:00:03Z","item":{"id":"item-1","type":"command_execution","name":"shell","status":"completed","output":"ok","exit_code":0}}
+{"type":"turn.completed","timestamp":"2026-07-04T00:00:04Z","usage":{"input_tokens":1200,"cached_input_tokens":100,"output_tokens":300,"reasoning_output_tokens":40,"cache_creation_input_tokens":10,"cache_read_input_tokens":20}}
