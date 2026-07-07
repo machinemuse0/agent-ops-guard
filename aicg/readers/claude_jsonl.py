@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+from .base import Capabilities
+from ..policy import EffectivePolicy, load_policy, sensitive_policy_findings, sensitive_policy_flags
 from ..models import (
+    PolicyFinding,
     NormalizedSession,
     NormalizedToolEvent,
     NormalizedTurn,
@@ -14,6 +18,8 @@ from ..util import (
     detect_policy_flags,
     detect_privacy_flags,
     duration_ms,
+    call_targets_to_text,
+    extract_call_targets,
     flags_to_text,
     hash_file,
     normalize_timestamp,
@@ -35,6 +41,24 @@ TOKEN_FIELDS = (
 class ClaudeJsonlReader:
     provider = "claude"
 
+    def __init__(self, policy: EffectivePolicy | None = None) -> None:
+        self.policy = policy or load_policy()
+
+    def capabilities(self) -> Capabilities:
+        return Capabilities(
+            token_usage=True,
+            cache_semantics="disjoint",
+            tool_events=True,
+            turn_status=True,
+            session_resume=True,
+            background_flag=True,
+            native_cost=False,
+        )
+
+    def discover(self, since, paths: dict[str, Path] | None = None, known_sources: set[str] | None = None):
+        root = _claude_projects_dir()
+        yield from _jsonl_files_since(root, since, known_sources)
+
     def read(self, path: Path) -> ParsedRecords:
         source = Path(path)
         source_hash = hash_file(source)
@@ -42,38 +66,61 @@ class ClaudeJsonlReader:
         session: NormalizedSession | None = None
         turns: list[NormalizedTurn] = []
         tool_events: list[NormalizedToolEvent] = []
+        policy_findings: list[PolicyFinding] = []
         turn_by_message_id: dict[str, NormalizedTurn] = {}
         tool_by_raw_id: dict[str, NormalizedToolEvent] = {}
         raw_event_count = 0
         malformed_line_count = 0
+        current_line_number = 0
         first_seen_at: str | None = None
         last_seen_at: str | None = None
+        session_used_source_hash = False
         session_privacy_flags: set[str] = set()
         session_policy_flags: set[str] = set()
 
         def ensure_session(event: dict[str, Any] | None = None) -> NormalizedSession:
-            nonlocal session
-            if session is not None:
-                if event:
-                    session.project_path = _first_str(event, "cwd") or session.project_path
-                return session
+            nonlocal session, session_used_source_hash
             event = event or {}
+            raw_session_id = _first_str(event, "sessionId", "session_id")
+            if session is not None:
+                if raw_session_id and session_used_source_hash:
+                    _rekey_session(
+                        session,
+                        turns,
+                        tool_events,
+                        stable_id("session", self.provider, raw_session_id),
+                    )
+                    session.native_session_id = raw_session_id
+                    session.lineage_id = raw_session_id
+                    session_used_source_hash = False
+                session.project_path = _first_str(event, "cwd") or session.project_path
+                session.source_line_start = session.source_line_start or current_line_number
+                session.source_line_end = current_line_number or session.source_line_end
+                session.model = session.model or _message_model(event)
+                session.task_type = session.task_type or _task_type(event)
+                session.background_flag = session.background_flag or _is_sidechain(event)
+                return session
+            session_used_source_hash = raw_session_id is None
             session_id = stable_id(
                 "session",
                 self.provider,
-                _first_str(event, "sessionId", "session_id") or source_hash,
+                raw_session_id or source_hash,
             )
             session = NormalizedSession(
                 id=session_id,
                 provider=self.provider,
+                native_session_id=raw_session_id,
+                lineage_id=raw_session_id or source_hash,
                 project_path=_first_str(event, "cwd") or _project_from_path(source),
                 source_file=str(source),
                 source_file_hash=source_hash,
+                source_line_start=current_line_number or None,
+                source_line_end=current_line_number or None,
                 started_at=_timestamp(event) or first_seen_at,
                 status="running",
                 model=_message_model(event),
                 task_type=_task_type(event),
-                background_flag=bool(event.get("isSidechain")),
+                background_flag=_is_sidechain(event),
                 raw_event_count=0,
                 malformed_line_count=0,
                 created_at=created_at,
@@ -81,7 +128,7 @@ class ClaudeJsonlReader:
             return session
 
         with source.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
+            for current_line_number, line in enumerate(handle, start=1):
                 text = line.strip()
                 if not text:
                     continue
@@ -102,7 +149,7 @@ class ClaudeJsonlReader:
                     last_seen_at = event_time
                 active_session = ensure_session(event)
 
-                privacy_flags, policy_flags = _event_flags(event)
+                privacy_flags, policy_flags = _event_flags(event, self.policy)
                 session_privacy_flags.update(privacy_flags)
                 session_policy_flags.update(policy_flags)
 
@@ -118,21 +165,33 @@ class ClaudeJsonlReader:
                         turn = NormalizedTurn(
                             id=stable_id(
                                 "turn",
+                                self.provider,
+                                raw_message_id,
+                            )
+                            if raw_message_id
+                            else stable_id(
+                                "turn",
                                 active_session.id,
-                                raw_message_id or len(turns) + 1,
+                                source_hash,
+                                len(turns) + 1,
                             ),
                             session_id=active_session.id,
                             provider=self.provider,
+                            native_turn_key=f"{self.provider}:{raw_message_id}" if raw_message_id else f"{self.provider}:{source_hash}:{len(turns) + 1}",
+                            source_file_hash=source_hash,
+                            source_line_start=current_line_number,
+                            source_line_end=current_line_number,
                             started_at=event_time,
                             ended_at=event_time,
                             status="completed",
                             model=_message_model(event) or active_session.model,
                             task_type=_task_type(event) or active_session.task_type,
-                            background_flag=active_session.background_flag,
+                            background_flag=active_session.background_flag or _is_sidechain(event),
                         )
                         turns.append(turn)
                         if raw_message_id:
                             turn_by_message_id[raw_message_id] = turn
+                    turn.source_line_end = current_line_number or turn.source_line_end
                     _apply_usage(turn, message)
                     _merge_turn_flags(turn, privacy_flags, policy_flags)
                     active_session.model = turn.model or active_session.model
@@ -148,6 +207,10 @@ class ClaudeJsonlReader:
                         event_time,
                         session_privacy_flags,
                         session_policy_flags,
+                        policy_findings,
+                        self.policy,
+                        source_hash,
+                        current_line_number,
                     )
                     continue
 
@@ -160,6 +223,10 @@ class ClaudeJsonlReader:
                         event_time,
                         session_privacy_flags,
                         session_policy_flags,
+                        policy_findings,
+                        self.policy,
+                        source_hash,
+                        current_line_number,
                     )
                     continue
 
@@ -171,18 +238,31 @@ class ClaudeJsonlReader:
         active_session.malformed_line_count = malformed_line_count
         active_session.started_at = active_session.started_at or first_seen_at
         active_session.ended_at = active_session.ended_at or last_seen_at
+        active_session.source_line_start = active_session.source_line_start or 1
+        active_session.source_line_end = active_session.source_line_end or current_line_number or None
         active_session.duration_ms = duration_ms(active_session.started_at, active_session.ended_at)
-        active_session.retry_count = sum(1 for turn in turns if turn.status == "failed")
+        active_session.retry_count = sum(turn.retry_count for turn in turns)
         active_session.privacy_flags = flags_to_text(session_privacy_flags)
         active_session.policy_flags = flags_to_text(session_policy_flags)
         if active_session.status == "running":
-            active_session.status = "completed" if raw_event_count else "unknown"
+            if not raw_event_count:
+                active_session.status = "unknown"
+            elif any(turn.status == "running" for turn in turns):
+                active_session.status = "interrupted"
+            elif turns:
+                active_session.status = "completed"
+            else:
+                active_session.status = "unknown"
         for turn in turns:
             turn.duration_ms = duration_ms(turn.started_at, turn.ended_at)
+            turn.source_line_end = turn.source_line_end or turn.source_line_start
+            if turn.status == "running":
+                turn.status = "interrupted"
         return ParsedRecords(
             sessions=[active_session],
             turns=turns,
             tool_events=tool_events,
+            policy_findings=policy_findings,
             malformed_line_count=malformed_line_count,
             source_file=str(source),
             source_file_hash=source_hash,
@@ -207,7 +287,26 @@ def _message_model(event: dict[str, Any]) -> str | None:
 
 
 def _task_type(event: dict[str, Any]) -> str | None:
-    return _first_str(event, "entrypoint", "permissionMode") or _first_str(event, "type")
+    return _first_str(event, "entrypoint", "permissionMode")
+
+
+def _is_sidechain(event: dict[str, Any]) -> bool:
+    return event.get("isSidechain") is True
+
+
+def _rekey_session(
+    session: NormalizedSession,
+    turns: list[NormalizedTurn],
+    tool_events: list[NormalizedToolEvent],
+    new_session_id: str,
+) -> None:
+    if session.id == new_session_id:
+        return
+    session.id = new_session_id
+    for turn in turns:
+        turn.session_id = new_session_id
+    for event in tool_events:
+        event.session_id = new_session_id
 
 
 def _project_from_path(source: Path) -> str | None:
@@ -215,6 +314,26 @@ def _project_from_path(source: Path) -> str | None:
     if parent.startswith("-"):
         return "/" + parent[1:].replace("-", "/")
     return None
+
+
+def _claude_projects_dir() -> Path:
+    if "CLAUDE_CONFIG_DIR" in os.environ:
+        return Path(os.environ["CLAUDE_CONFIG_DIR"]).expanduser() / "projects"
+    return Path("~/.claude/projects").expanduser()
+
+
+def _jsonl_files_since(root: Path, cutoff, known_sources: set[str] | None = None) -> list[Path]:
+    if not root.exists():
+        return []
+    known_sources = known_sources or set()
+    files: list[Path] = []
+    for path in root.rglob("*.jsonl"):
+        try:
+            if path.is_file() and (str(path) not in known_sources or path.stat().st_mtime >= cutoff.timestamp()):
+                files.append(path)
+        except OSError:
+            continue
+    return sorted(files)
 
 
 def _apply_usage(turn: NormalizedTurn, message: dict[str, Any]) -> None:
@@ -225,6 +344,7 @@ def _apply_usage(turn: NormalizedTurn, message: dict[str, Any]) -> None:
         parsed = _int_or_none(usage.get(field))
         if parsed is not None:
             setattr(turn, field, parsed)
+    turn.input_uncached_tokens = turn.input_tokens
 
 
 def _collect_tool_use(
@@ -236,18 +356,30 @@ def _collect_tool_use(
     event_time: str | None,
     session_privacy_flags: set[str],
     session_policy_flags: set[str],
+    policy_findings: list[PolicyFinding],
+    policy: EffectivePolicy,
+    source_file_hash: str,
+    source_line: int,
 ) -> None:
     for item in _content_items(message):
         if item.get("type") != "tool_use":
             continue
         raw_tool_id = _first_str(item, "id")
         session_privacy_flags.update(detect_privacy_flags(item.get("input")))
+        custom_privacy, custom_policy = sensitive_policy_flags(policy, item.get("input"))
+        session_privacy_flags.update(custom_privacy)
+        session_policy_flags.update(custom_policy)
         session_policy_flags.update(detect_policy_flags(item.get("input")))
         tool = NormalizedToolEvent(
-            id=stable_id("tool", session.id, turn.id, raw_tool_id or len(tool_events) + 1),
+            id=stable_id("tool", "claude", raw_tool_id)
+            if raw_tool_id
+            else stable_id("tool", session.id, turn.id, len(tool_events) + 1),
             session_id=session.id,
             turn_id=turn.id,
             provider="claude",
+            source_file_hash=source_file_hash,
+            source_line_start=source_line,
+            source_line_end=source_line,
             tool_type=_claude_tool_type(_first_str(item, "name")),
             tool_name=_first_str(item, "name"),
             status="running",
@@ -255,6 +387,7 @@ def _collect_tool_use(
             ended_at=None,
             output_bytes=0,
             exit_code=None,
+            call_target=call_targets_to_text(extract_call_targets(item.get("input"))),
         )
         if raw_tool_id and raw_tool_id in tool_by_raw_id:
             existing = tool_by_raw_id[raw_tool_id]
@@ -262,10 +395,25 @@ def _collect_tool_use(
             existing.tool_type = existing.tool_type or tool.tool_type
             existing.started_at = existing.started_at or tool.started_at
             existing.turn_id = existing.turn_id or tool.turn_id
+            existing.source_file_hash = existing.source_file_hash or source_file_hash
+            existing.source_line_start = existing.source_line_start or source_line
+            existing.source_line_end = source_line
+            existing.call_target = existing.call_target or call_targets_to_text(extract_call_targets(item.get("input")))
+            tool = existing
         else:
             tool_events.append(tool)
             if raw_tool_id:
                 tool_by_raw_id[raw_tool_id] = tool
+        policy_findings.extend(
+            sensitive_policy_findings(
+                policy,
+                value=item.get("input"),
+                session_id=session.id,
+                tool_event_id=tool.id,
+                surface="call",
+                now=event_time,
+            )
+        )
 
 
 def _collect_tool_results(
@@ -276,6 +424,10 @@ def _collect_tool_results(
     event_time: str | None,
     session_privacy_flags: set[str],
     session_policy_flags: set[str],
+    policy_findings: list[PolicyFinding],
+    policy: EffectivePolicy,
+    source_file_hash: str,
+    source_line: int,
 ) -> None:
     for item in _content_items(message):
         if item.get("type") != "tool_result":
@@ -283,14 +435,21 @@ def _collect_tool_results(
         raw_tool_id = _first_str(item, "tool_use_id")
         output_bytes = _content_bytes(item.get("content"))
         session_privacy_flags.update(detect_privacy_flags(item.get("content")))
-        session_policy_flags.update(detect_policy_flags(item.get("content")))
+        custom_privacy, custom_policy = sensitive_policy_flags(policy, item.get("content"))
+        session_privacy_flags.update(custom_privacy)
+        session_policy_flags.update(custom_policy)
         tool = tool_by_raw_id.get(raw_tool_id or "")
         if tool is None:
             tool = NormalizedToolEvent(
-                id=stable_id("tool", session.id, raw_tool_id or len(tool_events) + 1),
+                id=stable_id("tool", "claude", raw_tool_id)
+                if raw_tool_id
+                else stable_id("tool", session.id, len(tool_events) + 1),
                 session_id=session.id,
                 turn_id=None,
                 provider="claude",
+                source_file_hash=source_file_hash,
+                source_line_start=source_line,
+                source_line_end=source_line,
                 tool_type="unknown",
                 tool_name=None,
                 status="completed",
@@ -306,7 +465,20 @@ def _collect_tool_results(
             tool.status = "completed"
             tool.ended_at = event_time or tool.ended_at
             tool.output_bytes = max(tool.output_bytes, output_bytes)
+            tool.source_file_hash = tool.source_file_hash or source_file_hash
+            tool.source_line_start = tool.source_line_start or source_line
+            tool.source_line_end = source_line
             tool.duration_ms = duration_ms(tool.started_at, tool.ended_at)
+        policy_findings.extend(
+            sensitive_policy_findings(
+                policy,
+                value=item.get("content"),
+                session_id=session.id,
+                tool_event_id=tool.id,
+                surface="output",
+                now=event_time,
+            )
+        )
 
 
 def _content_items(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -334,18 +506,24 @@ def _content_bytes(value: Any) -> int:
     return len(str(value).encode("utf-8", errors="replace"))
 
 
-def _event_flags(event: dict[str, Any]) -> tuple[set[str], set[str]]:
+def _event_flags(event: dict[str, Any], policy: EffectivePolicy) -> tuple[set[str], set[str]]:
     privacy_flags: set[str] = set()
     policy_flags: set[str] = set()
     message = event.get("message") if isinstance(event.get("message"), dict) else {}
     for key in ("content", "diagnostics", "stop_details"):
         if key in message:
             privacy_flags.update(detect_privacy_flags(message[key]))
-            policy_flags.update(detect_policy_flags(message[key]))
+            custom_privacy, custom_policy = sensitive_policy_flags(policy, message[key])
+            privacy_flags.update(custom_privacy)
+            policy_flags.update(custom_policy)
     for key in ("content", "attachment", "operation"):
         if key in event:
             privacy_flags.update(detect_privacy_flags(event[key]))
-            policy_flags.update(detect_policy_flags(event[key]))
+            custom_privacy, custom_policy = sensitive_policy_flags(policy, event[key])
+            privacy_flags.update(custom_privacy)
+            policy_flags.update(custom_policy)
+            if key == "operation":
+                policy_flags.update(detect_policy_flags(event[key]))
     return privacy_flags, policy_flags
 
 
@@ -377,9 +555,11 @@ def _looks_failed(mapping: dict[str, Any]) -> bool:
 
 
 def _mark_failed(turn: NormalizedTurn, message: dict[str, Any], event_time: str | None) -> None:
+    was_failed = turn.status == "failed"
     turn.status = "failed"
     turn.ended_at = event_time or turn.ended_at
-    turn.retry_count += 1
+    if not was_failed:
+        turn.retry_count += 1
     turn.error_type = _first_str(message, "stop_reason", "type") or "error"
     error_text = _first_str(message, "error", "stop_sequence")
     if error_text:

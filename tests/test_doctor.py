@@ -1,6 +1,8 @@
 import os
 
 from aicg.doctor import collect_doctor_report, format_doctor_markdown
+from aicg.config import ensure_app_dirs
+from aicg.db import init_db
 
 
 def test_doctor_markdown_includes_repair_suggestions():
@@ -132,3 +134,34 @@ def test_doctor_deep_max_files_reports_scan_cap(tmp_path, monkeypatch):
     assert report["mode"]["deep"] is True
     assert report["limits"]["maxFiles"] == 3
     assert report["largeFiles"]["scanCapReached"] is True
+
+
+def test_doctor_self_check_reports_healthy_db(tmp_path, monkeypatch):
+    ensure_app_dirs(tmp_path / "aicg")
+    init_db(tmp_path / "aicg" / "aicg.sqlite")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+    monkeypatch.setenv("PATH", "")
+
+    report = collect_doctor_report(tmp_path / "aicg", self_check=True)
+    markdown = format_doctor_markdown(report)
+
+    assert report["selfCheck"]["status"] == "pass"
+    assert "Self-check" in markdown
+    assert "db.schema_version" in markdown
+
+
+def test_doctor_self_check_reports_malformed_config_without_crashing(tmp_path, monkeypatch):
+    app_dir = tmp_path / "aicg"
+    app_dir.mkdir()
+    (app_dir / "config.toml").write_text("[prices.\n", encoding="utf-8")
+    init_db(app_dir / "aicg.sqlite")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+    monkeypatch.setenv("PATH", "")
+
+    report = collect_doctor_report(app_dir, self_check=True)
+
+    assert report["configError"]["type"] == "TOMLDecodeError"
+    assert report["selfCheck"]["status"] == "fail"
+    assert any(check["id"] == "config.parse" and check["status"] == "fail" for check in report["selfCheck"]["checks"])

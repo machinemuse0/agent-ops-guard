@@ -36,3 +36,23 @@ def test_scan_file_error_is_isolated_and_deduplicated(tmp_path):
         assert row["error_type"] == "RuntimeError"
         assert row["error_message_hash"] != "SECRET_TOKEN=should-not-be-stored"
         assert "error_message" not in columns
+
+
+def test_successful_rescan_clears_prior_scan_error(tmp_path):
+    db_path = tmp_path / "aicg.sqlite"
+    path = tmp_path / "recover.jsonl"
+    path.write_text("bad", encoding="utf-8")
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        assert _read_provider_file(conn, "codex", ExplodingReader(), path) is None
+        assert count_rows(conn, "scan_errors") == 1
+        path.write_text(
+            '{"type":"session_meta","timestamp":"2026-07-05T00:00:00Z","payload":{"id":"recovered"}}\n',
+            encoding="utf-8",
+        )
+        records = _read_provider_file(conn, "codex", CodexJsonlReader(), path)
+        assert records is not None
+        conn.commit()
+
+        assert count_rows(conn, "scan_errors") == 0

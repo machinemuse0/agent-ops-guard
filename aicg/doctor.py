@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from .config import app_paths, load_config
+from .self_check import run_self_check
 from .util import sha256_text, utc_now_iso
+
+
+RECENT_ERROR_MAX_BYTES_PER_FILE = 1024 * 1024
 
 
 def run_doctor(
@@ -20,8 +24,15 @@ def run_doctor(
     online: bool = False,
     deep: bool = False,
     max_files: int = 50,
+    self_check: bool = False,
 ) -> str:
-    report = collect_doctor_report(app_dir, online=online, deep=deep, max_files=max_files)
+    report = collect_doctor_report(
+        app_dir,
+        online=online,
+        deep=deep,
+        max_files=max_files,
+        self_check=self_check,
+    )
     if json_output:
         return json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
     return format_doctor_markdown(report)
@@ -33,10 +44,16 @@ def collect_doctor_report(
     online: bool = False,
     deep: bool = False,
     max_files: int = 50,
+    self_check: bool = False,
 ) -> dict[str, Any]:
     bounded_max_files = max(1, int(max_files))
     paths = app_paths(app_dir)
-    config = load_config(app_dir)
+    config_error = None
+    try:
+        config = load_config(app_dir)
+    except Exception as exc:
+        config_error = {"type": type(exc).__name__, "messageHash": sha256_text(str(exc))}
+        config = {"thresholds": {"large_history_file_bytes": 104857600}, "prices": {}}
     threshold = int(config["thresholds"].get("large_history_file_bytes", 104857600))
     codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
     claude_root = Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
@@ -60,9 +77,11 @@ def collect_doctor_report(
         },
         "limits": {
             "maxFiles": bounded_max_files,
+            "recentErrorMaxBytesPerFile": RECENT_ERROR_MAX_BYTES_PER_FILE,
         },
         "python": _python_info(),
         "aicg": _aicg_paths(paths),
+        "configError": config_error,
         "codex": _codex_info(codex_home, online=online, max_files=bounded_max_files),
         "claude": _claude_info(claude_root, max_files=bounded_max_files),
         "largeFiles": _large_files(
@@ -80,6 +99,8 @@ def collect_doctor_report(
             "claude": claude_error_scan,
         },
     }
+    if self_check:
+        report["selfCheck"] = run_self_check(app_dir)
     report["recommendations"] = _recommendations(report)
     return report
 
@@ -166,6 +187,13 @@ def format_doctor_markdown(report: dict[str, Any]) -> str:
             lines.append("- ... more files omitted")
     else:
         lines.append("- none found")
+
+    if "selfCheck" in report:
+        self_check = report["selfCheck"]
+        lines.extend(["", "## Self-check"])
+        lines.append(f"- Status: {self_check['status']}")
+        for check in self_check["checks"]:
+            lines.append(f"- `{check['id']}` [{check['status']}]: {check['summary']}")
 
     lines.extend(["", "## Repair suggestions"])
     if report["recommendations"]:
@@ -479,27 +507,27 @@ def _recent_jsonl_errors(
     max_files: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     files = []
-    scan_cap_reached = False
     for root in roots:
         if not root.exists():
             continue
         try:
             for path in root.rglob("*.jsonl"):
-                if len(files) >= max_files:
-                    scan_cap_reached = True
-                    break
                 if path.is_file():
                     files.append(path)
         except OSError:
             continue
-        if scan_cap_reached:
-            break
-    files = sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)[:50]
+    files = sorted(files, key=_safe_mtime, reverse=True)
+    scan_cap_reached = len(files) > max_files
+    files = files[:max_files]
     errors: list[dict[str, Any]] = []
     for path in files:
         try:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
+                bytes_read = 0
                 for line in handle:
+                    bytes_read += len(line.encode("utf-8", errors="replace"))
+                    if bytes_read > RECENT_ERROR_MAX_BYTES_PER_FILE:
+                        break
                     if not line.strip():
                         continue
                     try:
@@ -515,10 +543,22 @@ def _recent_jsonl_errors(
                                 return errors, {
                                     "filesChecked": len(files),
                                     "scanCapReached": scan_cap_reached,
+                                    "maxBytesPerFile": RECENT_ERROR_MAX_BYTES_PER_FILE,
                                 }
         except OSError:
             continue
-    return errors, {"filesChecked": len(files), "scanCapReached": scan_cap_reached}
+    return errors, {
+        "filesChecked": len(files),
+        "scanCapReached": scan_cap_reached,
+        "maxBytesPerFile": RECENT_ERROR_MAX_BYTES_PER_FILE,
+    }
+
+
+def _safe_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _error_signal(event: dict[str, Any], provider: str) -> dict[str, Any] | None:
@@ -550,6 +590,8 @@ def _recommendations(report: dict[str, Any]) -> list[str]:
         recommendations.append(
             "Run `python -m aicg init` to create the local app directories and SQLite DB."
         )
+    if report.get("configError"):
+        recommendations.append("Fix `~/.aicg/config.toml` parsing before relying on thresholds or pricing.")
     codex = report["codex"]
     if not codex["binary"]:
         recommendations.append("Install or expose `codex` on PATH before running Codex diagnostics.")
@@ -578,6 +620,8 @@ def _recommendations(report: dict[str, Any]) -> list[str]:
         recommendations.append("Inspect recent Codex error-like rollout events before resuming affected threads.")
     if report["recentErrors"]["claude"]:
         recommendations.append("Inspect recent Claude transcript error-like events before continuing those sessions.")
+    if report.get("selfCheck", {}).get("status") == "fail":
+        recommendations.append("Inspect `doctor --self-check --json` failures before publishing or migrating the local DB.")
     return _dedupe(recommendations)
 
 

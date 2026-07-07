@@ -8,7 +8,7 @@ AgentOps Guard 是一个 local-first 的 AI coding agent 使用诊断与成本�
 python -m aicg
 ```
 
-当前版本是 `v0.1.1`。这个阶段的重点不是云端商业化，也不是接管账单系统，而是先把本机日志变成可信、可复核、不会泄露 raw prompt/code/output 的本地报告。
+当前版本是 `v0.5`。这个阶段的重点不是云端商业化，也不是接管账单系统，而是把本机日志变成可信、可迁移、可复核、不会泄露 raw prompt/code/output 的本地报告和 metadata 数据层。
 
 ## Why
 
@@ -24,21 +24,33 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 
 ## Current Capabilities
 
-`v0.1.1` 已实现：
+`v0.5` 已实现：
 
 - `python -m aicg init`
 - `python -m aicg capture codex -- ...`
-- `python -m aicg scan --since 24h`
+- `python -m aicg providers`
+- `python -m aicg scan --since 24h --provider all`
+- `python -m aicg rebuild --since all`
+- `python -m aicg import usage --provider openrouter --file usage.json`
 - `python -m aicg summary --since 24h --out daily.md`
+- `python -m aicg summary --period week --compare --out weekly.md`
+- `python -m aicg policy check --since 24h --fail-on violation`
+- `python -m aicg policy rules`
+- `python -m aicg policy ack <finding_id> --reason "approved"`
+- `python -m aicg git link /path/to/repo`
+- `python -m aicg git sync --since 7d`
 - `python -m aicg doctor`
 - `python -m aicg doctor --json`
 - `python -m aicg doctor --online --json`
 - `python -m aicg doctor --deep --max-files 500`
+- `python -m aicg doctor --self-check --json`
+- `python -m aicg inspect session <session_id> --format md|json`
+- `python -m aicg export --kind sessions|turns|tool-events|issues|scan-errors --format json|csv --out <path>`
 
 当前 reader 支持：
 
 - Codex JSONL rollout/session logs
-- Codex captured JSONL from `aicg capture`
+- Legacy/imported Codex JSONL under `~/.aicg/raw/codex`
 - Claude Code project transcript JSONL
 
 当前 analyzer 支持：
@@ -71,7 +83,10 @@ AgentOps Guard 默认只处理本地文件：
 
 SQLite 只保存 normalized metadata，例如 project path、provider、model、session/turn status、token counts、duration、retry count、tool names、output byte counts、hashed errors、privacy flags 和 policy flags。
 
+`python -m aicg capture codex -- ...` 默认只透传子进程 stdout 并记录 sanitized run metadata；它不会把 stdout 复制到 `raw/codex`。显式使用 `--store-redacted` 时，capture 只写入 redacted JSONL marker 和 redacted stdout lines；`--no-store` 是默认行为。`raw/codex` 仅作为 legacy/imported JSONL 的本地扫描目录保留。
+
 文件解析失败会进入 `scan_errors`，只保存 `error_type` 和 `error_message_hash`，不会保存原始异常全文。
+Issue evidence 会进入 `issue_evidence`，只保存 source hash、line range、metric key/value 和 message hash，不保存 raw payload 或 redacted excerpt。
 
 ## Local State
 
@@ -84,6 +99,7 @@ SQLite 只保存 normalized metadata，例如 project path、provider、model、
   raw/codex/
   raw/claude/
   reports/
+  policy.toml
 ```
 
 临时运行可以设置 `AICG_HOME`：
@@ -103,12 +119,12 @@ python -m aicg init
 扫描最近 24 小时的 Codex 和 Claude Code 日志：
 
 ```bash
-python -m aicg scan --since 24h
+python -m aicg scan --since 24h --provider all
 ```
 
 扫描来源包括：
 
-- `~/.aicg/raw/codex/**/*.jsonl`
+- `~/.aicg/raw/codex/**/*.jsonl`（legacy/imported local JSONL）
 - `~/.codex/sessions/**/*.jsonl`
 - `~/.codex/archived_sessions/**/*.jsonl`
 - `~/.claude/projects/**/*.jsonl`
@@ -117,6 +133,36 @@ python -m aicg scan --since 24h
 
 ```bash
 python -m aicg summary --since 24h --out ~/.aicg/reports/daily.md
+```
+
+生成 JSON 日报：
+
+```bash
+python -m aicg summary --since 24h --format json --out ~/.aicg/reports/daily.json
+```
+
+生成周期快照并对比上一周期：
+
+```bash
+python -m aicg summary --period week --compare --out ~/.aicg/reports/weekly.md
+```
+
+查看 provider capability：
+
+```bash
+python -m aicg providers
+```
+
+重建派生表：
+
+```bash
+python -m aicg rebuild --since all
+```
+
+检查本地 policy：
+
+```bash
+python -m aicg policy check --since 24h --fail-on violation
 ```
 
 运行默认离线诊断：
@@ -139,6 +185,25 @@ python -m aicg doctor --online --json
 python -m aicg doctor --deep --max-files 500 --out ~/.aicg/reports/doctor-deep.md
 ```
 
+运行 AICG 自检：
+
+```bash
+python -m aicg doctor --self-check --json
+```
+
+Inspect 单个 session：
+
+```bash
+python -m aicg inspect session <session_id> --format json
+```
+
+导出 normalized metadata：
+
+```bash
+python -m aicg export --kind issues --format json --since 24h --out ~/.aicg/reports/issues.json
+python -m aicg export --kind sessions --format csv --since 24h --out ~/.aicg/reports/sessions.csv
+```
+
 ## Daily Report
 
 日报包含：
@@ -153,8 +218,9 @@ python -m aicg doctor --deep --max-files 500 --out ~/.aicg/reports/doctor-deep.m
 - Privacy and policy findings
 - High-risk issues
 - Recommended fixes
+- Consistency checks in JSON output
 
-`v0.1.1` 的 session 计数按 `session_id` 去重。即使一个 session 被拆成多个 `model/task_type` rollup，privacy/policy、failure/retry 和 background anomalies 也不会被重复放大。
+`v0.5` 的日报先生成 `daily_report` JSON model，再从同一个 model 渲染 Markdown。session 计数按 `session_id` 去重；即使一个 session 被拆成多个 `model/task_type` rollup，privacy/policy、failure/retry、background anomalies、waste 和 git activity 也不会被重复放大。
 
 ## Local Pricing
 
@@ -173,7 +239,16 @@ cache_read_input_per_mtok_usd = 0
 credit_per_usd = 1
 ```
 
+`reasoning_output_per_mtok_usd` 已废弃。`reasoning_output_tokens` 是
+`output_tokens` 的子集，不参与 total，也不单独计价。
+
 无匹配价格时，`estimated_cost_usd` 和 `credit_estimate` 保持 unavailable。
+
+Provider token 语义按来源处理，避免重复计算：
+
+- Codex/OpenAI: raw `input_tokens` 可包含 cached input；canonical total 使用 `input_uncached_tokens + cache_read_input_tokens + cache_creation_input_tokens + output_tokens`。
+- Claude: raw `input_tokens` 本身是不含 cache bucket 的 input；canonical total 同样使用上述互斥 bucket。
+- Markdown 日报只有在所有 turn 都匹配本地价格时才把成本显示为完整估算；部分匹配时会标明 priced turn coverage，并明确 unpriced turns excluded。
 
 ## Doctor
 
@@ -197,6 +272,8 @@ credit_per_usd = 1
 
 `doctor --deep` 会递归扫描大目录，但仍受 `--max-files` 限制。报告会输出 `mode.offline`、`mode.deep`、`limits.maxFiles` 和 `scanCapReached`，方便解释诊断覆盖范围。
 
+`doctor --self-check` 会验证 DB schema version、required tables/columns/indexes、config parse、price table numeric fields、report JSON consistency、overview counts，以及 `scan_errors` 是否只保存 hash。
+
 Doctor 永远不自动删除缓存、不修改 Codex/Claude 配置、不重建 state DB。
 
 ## Architecture
@@ -212,6 +289,7 @@ aicg/
   analyzer.py
   pricing.py
   reporter.py
+  self_check.py
   readers/
     codex_jsonl.py
     claude_jsonl.py
@@ -243,7 +321,7 @@ local JSONL logs
 
 ### Phase 0: Trustworthy local core
 
-状态：基本完成，对应 `v0.1.1`。
+状态：完成，对应 `v0.1.1`。
 
 目标：
 
@@ -262,6 +340,8 @@ local JSONL logs
 ### Phase 1: Schema and evidence hardening
 
 目标版本：`v0.2`
+
+状态：完成。
 
 计划：
 

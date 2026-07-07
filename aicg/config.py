@@ -57,6 +57,28 @@ large_history_file_bytes = 104857600
 """
 
 
+DEFAULT_POLICY_TOML = """[policy]
+version = 1
+
+[policy.secrets]
+enabled = true
+builtin = ["openai_key", "anthropic_key", "github_token", "bearer_header", "generic_env_assignment"]
+
+[policy.sensitive_paths]
+enabled = true
+builtin = ["dot_env", "ssh_keys", "cloud_credentials"]
+
+[policy.services]
+mode = "denylist"
+deny = ["api.openai.com"]
+allow = []
+flag_mentions = false
+
+[policy.raw_payload]
+threshold_bytes = 65536
+"""
+
+
 def default_app_dir() -> Path:
     return Path(os.environ.get("AICG_HOME", "~/.aicg")).expanduser()
 
@@ -66,6 +88,7 @@ def app_paths(app_dir: Path | None = None) -> dict[str, Path]:
     return {
         "app": root,
         "config": root / "config.toml",
+        "policy": root / "policy.toml",
         "db": root / "aicg.sqlite",
         "raw": root / "raw",
         "raw_codex": root / "raw" / "codex",
@@ -86,6 +109,10 @@ def ensure_app_dirs(app_dir: Path | None = None) -> dict[str, str]:
     if not existed:
         paths["config"].write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
     status[str(paths["config"])] = "existing" if existed else "created"
+    policy_existed = paths["policy"].exists()
+    if not policy_existed:
+        paths["policy"].write_text(DEFAULT_POLICY_TOML, encoding="utf-8")
+    status[str(paths["policy"])] = "existing" if policy_existed else "created"
     return status
 
 

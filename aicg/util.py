@@ -3,8 +3,10 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import re
+import shlex
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 UTC = dt.timezone.utc
@@ -123,9 +125,10 @@ SECRET_PATTERNS = (
 SENSITIVE_PATH_PATTERNS = (
     re.compile(r"(?i)(^|/)\.env(\.|$|/)"),
     re.compile(r"(?i)(^|/)\.ssh(/|$)"),
-    re.compile(r"(?i)(^|/)(id_rsa|id_ed25519|auth\.json|credentials)(\.|$)"),
-    re.compile(r"/Users/[^/\s]+/"),
-    re.compile(r"/home/[^/\s]+/"),
+    re.compile(r"(?i)(^|/)\.aws(/|$)"),
+    re.compile(r"(?i)(^|/)\.config/(gcloud|gh)(/|$)"),
+    re.compile(r"(?i)(^|/)kube/config($|\s)"),
+    re.compile(r"(?i)(^|/)(id_rsa|id_ed25519|auth\.json|credentials|\.npmrc|\.pypirc)(\.|$)"),
 )
 
 
@@ -134,6 +137,11 @@ RESTRICTED_SERVICE_PATTERNS = (
     re.compile(r"api\.anthropic\.com|claude\.ai", re.IGNORECASE),
     re.compile(r"openrouter\.ai|generativelanguage\.googleapis\.com", re.IGNORECASE),
     re.compile(r"api\.deepseek\.com|api\.moonshot\.cn", re.IGNORECASE),
+)
+
+
+HOST_PATTERN = re.compile(
+    r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63})\b"
 )
 
 
@@ -149,7 +157,7 @@ def split_flags(value: str | None) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
-def detect_privacy_flags(value: Any, *, raw_payload_threshold: int = 2048) -> set[str]:
+def detect_privacy_flags(value: Any, *, raw_payload_threshold: int = 65536) -> set[str]:
     text = _safe_text(value)
     if not text:
         return set()
@@ -164,12 +172,53 @@ def detect_privacy_flags(value: Any, *, raw_payload_threshold: int = 2048) -> se
 
 
 def detect_policy_flags(value: Any) -> set[str]:
+    targets = extract_call_targets(value)
+    if not targets:
+        return set()
+    target_text = " ".join(targets)
+    if any(pattern.search(target_text) for pattern in RESTRICTED_SERVICE_PATTERNS):
+        return {"RESTRICTED_SERVICE_CALL"}
+    return set()
+
+
+def call_targets_to_text(targets: set[str] | list[str] | tuple[str, ...]) -> str | None:
+    normalized = sorted({target.lower() for target in targets if target})
+    return ",".join(normalized) if normalized else None
+
+
+def extract_call_targets(value: Any) -> set[str]:
     text = _safe_text(value)
     if not text:
         return set()
-    if any(pattern.search(text) for pattern in RESTRICTED_SERVICE_PATTERNS):
-        return {"RESTRICTED_SERVICE_CALL"}
-    return set()
+    targets: set[str] = set()
+    for match in re.finditer(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE):
+        parsed = urlparse(match.group(0))
+        if parsed.hostname:
+            targets.add(parsed.hostname.lower())
+    for token in _command_tokens(text):
+        parsed = urlparse(token)
+        if parsed.scheme in {"http", "https"} and parsed.hostname:
+            targets.add(parsed.hostname.lower())
+            continue
+        if "/" in token and not token.startswith(("/", "./", "../")):
+            possible_host = token.split("/", 1)[0]
+        else:
+            possible_host = token
+        if HOST_PATTERN.fullmatch(possible_host) and not _looks_like_local_file(possible_host):
+            targets.add(possible_host.lower())
+    return targets
+
+
+def _command_tokens(text: str) -> list[str]:
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def _looks_like_local_file(value: str) -> bool:
+    lowered = value.lower()
+    return lowered.endswith((".py", ".js", ".ts", ".json", ".toml", ".md", ".txt", ".rs"))
 
 
 def _safe_text(value: Any) -> str:

@@ -53,6 +53,55 @@ def test_pricing_applies_exact_provider_model_match(tmp_path):
     assert session["credit_estimate"] == 6.0
 
 
+def test_codex_pricing_does_not_double_count_cached_or_reasoning_tokens(tmp_path):
+    db_path = tmp_path / "aicg.sqlite"
+    init_db(db_path)
+    now = utc_now_iso()
+    config = {
+        "prices": {
+            "codex:gpt-5.5": {
+                "input_per_mtok_usd": 1,
+                "cached_input_per_mtok_usd": 0.1,
+                "output_per_mtok_usd": 2,
+                "reasoning_output_per_mtok_usd": 0,
+                "credit_per_usd": 1,
+            }
+        }
+    }
+
+    with connect(db_path) as conn:
+        upsert_session(
+            conn,
+            NormalizedSession(
+                id="session-codex-overlap",
+                provider="codex",
+                started_at=now,
+                status="completed",
+                model="gpt-5.5",
+                created_at=now,
+            ),
+        )
+        upsert_turn(
+            conn,
+            NormalizedTurn(
+                id="turn-codex-overlap",
+                session_id="session-codex-overlap",
+                provider="codex",
+                started_at=now,
+                status="completed",
+                model="gpt-5.5",
+                input_tokens=1_000_000,
+                cached_input_tokens=250_000,
+                output_tokens=500_000,
+                reasoning_output_tokens=100_000,
+            ),
+        )
+        apply_pricing(conn, ["session-codex-overlap"], config)
+        turn = conn.execute("SELECT estimated_cost_usd FROM turns").fetchone()
+
+    assert turn["estimated_cost_usd"] == 1.775
+
+
 def test_pricing_does_not_fallback_to_provider_only(tmp_path):
     db_path = tmp_path / "aicg.sqlite"
     init_db(db_path)
