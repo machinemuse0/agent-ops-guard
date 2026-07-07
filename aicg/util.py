@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import html
 import re
 import shlex
 from pathlib import Path
@@ -111,6 +112,31 @@ def redact_secrets(text: str) -> str:
         flags=re.IGNORECASE,
     )
     return redacted
+
+
+def escape_markdown_text(value: object) -> str:
+    text = _display_text(value)
+    escaped = html.escape(text, quote=False).replace("|", r"\|")
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!])", r"\\\1", escaped)
+
+
+def markdown_code(value: object) -> str:
+    text = _display_text(value)
+    escaped = html.escape(text, quote=False).replace("|", "&#124;")
+    escaped = (
+        escaped.replace("!", r"\!")
+        .replace("[", r"\[")
+        .replace("]", r"\]")
+        .replace("(", r"\(")
+        .replace(")", r"\)")
+    )
+    if "`" not in text:
+        return f"`{escaped}`"
+    return f"<code>{escaped}</code>"
+
+
+def _display_text(value: object) -> str:
+    return str(value if value is not None else "unknown").replace("\r", " ").replace("\n", " ")
 
 
 SECRET_PATTERNS = (

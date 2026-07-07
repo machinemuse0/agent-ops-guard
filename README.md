@@ -8,7 +8,7 @@ AgentOps Guard 是一个 local-first 的 AI coding agent 使用诊断与成本�
 python -m aicg
 ```
 
-当前版本是 `v0.5`。这个阶段的重点不是云端商业化，也不是接管账单系统，而是把本机日志变成可信、可迁移、可复核、不会泄露 raw prompt/code/output 的本地报告和 metadata 数据层。
+当前版本是 `v0.6`。这个阶段的重点不是云端商业化，也不是接管账单系统，而是把本机日志变成可信、可迁移、可复核、不会泄露 raw prompt/code/output 的本地报告、review 诊断和 metadata 数据层。
 
 ## Why
 
@@ -24,7 +24,7 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 
 ## Current Capabilities
 
-`v0.5` 已实现：
+`v0.6` 已实现：
 
 - `python -m aicg init`
 - `python -m aicg capture codex -- ...`
@@ -34,6 +34,10 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 - `python -m aicg import usage --provider openrouter --file usage.json`
 - `python -m aicg summary --since 24h --out daily.md`
 - `python -m aicg summary --period week --compare --out weekly.md`
+- `python -m aicg review --session <session_id> --format md|json`
+- `python -m aicg review --last`
+- `python -m aicg review --since 24h --top 5`
+- `python -m aicg review --project <path> --since 7d`
 - `python -m aicg policy check --since 24h --fail-on violation`
 - `python -m aicg policy rules`
 - `python -m aicg policy ack <finding_id> --reason "approved"`
@@ -45,6 +49,7 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 - `python -m aicg doctor --deep --max-files 500`
 - `python -m aicg doctor --self-check --json`
 - `python -m aicg inspect session <session_id> --format md|json`
+- `python -m aicg inspect source <source_file_hash> --format md|json`
 - `python -m aicg export --kind sessions|turns|tool-events|issues|scan-errors --format json|csv --out <path>`
 
 当前 reader 支持：
@@ -87,6 +92,7 @@ SQLite 只保存 normalized metadata，例如 project path、provider、model、
 
 文件解析失败会进入 `scan_errors`，只保存 `error_type` 和 `error_message_hash`，不会保存原始异常全文。
 Issue evidence 会进入 `issue_evidence`，只保存 source hash、line range、metric key/value 和 message hash，不保存 raw payload 或 redacted excerpt。
+Review evidence 会进入 `review_evidence`，只保存 source hash、line range、metric key/value 和 message hash，不保存 prompt/code/output 原文或 redacted excerpt。
 
 ## Local State
 
@@ -147,6 +153,20 @@ python -m aicg summary --since 24h --format json --out ~/.aicg/reports/daily.jso
 python -m aicg summary --period week --compare --out ~/.aicg/reports/weekly.md
 ```
 
+Review 单个高风险 session：
+
+```bash
+python -m aicg review --session <session_id> --format md
+python -m aicg review --session <session_id> --export-issue review.md
+```
+
+按浪费/失败风险排序批量 review 或按项目聚合复发模式：
+
+```bash
+python -m aicg review --since 24h --top 5
+python -m aicg review --project /path/to/project --since 7d --format json
+```
+
 查看 provider capability：
 
 ```bash
@@ -195,6 +215,7 @@ Inspect 单个 session：
 
 ```bash
 python -m aicg inspect session <session_id> --format json
+python -m aicg inspect source <source_file_hash> --format json
 ```
 
 导出 normalized metadata：
@@ -221,6 +242,8 @@ python -m aicg export --kind sessions --format csv --since 24h --out ~/.aicg/rep
 - Consistency checks in JSON output
 
 `v0.5` 的日报先生成 `daily_report` JSON model，再从同一个 model 渲染 Markdown。session 计数按 `session_id` 去重；即使一个 session 被拆成多个 `model/task_type` rollup，privacy/policy、failure/retry、background anomalies、waste 和 git activity 也不会被重复放大。
+
+`v0.6` 起，High-risk issues 会追加 `run aicg review --session <id> for diagnosis` 引导。Review 是按需深查，不会读取 raw prompt/code/output；它诊断的是失败形状，例如重复 error hash、上下文膨胀、早期 shell 失败、输出洪泛和 interrupted tail。Review 默认只展示 source hash 和行号；需要在本机解析 source hash 时，显式运行 `python -m aicg inspect source <source_file_hash>`。
 
 ## Local Pricing
 
@@ -422,11 +445,11 @@ local JSONL logs
 
 目标版本：`v0.6`
 
-计划：
+状态：已实现。
 
 - 增加 `review` module。
 - 分析任务是否存在 repeated failure、tool output bloat、context overload、missing setup。
-- 增加 `aicg review --session <id>`。
+- 增加 `aicg review --session <id>`、`--last`、`--since --top`、`--project`。
 - 输出“下次运行前建议”。
 - 支持把高风险 session 导出成 issue template。
 

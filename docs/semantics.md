@@ -59,3 +59,40 @@ Policy severity is tied to surface:
 - `output`: tool output, can produce `warning`.
 - `mention`: assistant/user text mention, can produce `needs_review` only when
   mention scanning is enabled.
+
+## Review Diagnostics
+
+`aicg review` is deterministic for the same DB and
+`REVIEW_RULESET_VERSION`. Review output intentionally omits `generatedAt`.
+
+Review diagnoses failure shape from normalized metadata only. It never opens,
+copies, quotes, or redacts raw prompt/code/output content. Evidence pointers use
+source file hash, line ranges, metric key/value, and message hash.
+Resolving a source hash to the local path is an explicit user action via
+`python -m aicg inspect source <source_file_hash>`.
+
+Initial review codes:
+
+- `REPEATED_IDENTICAL_FAILURE`
+- `EDIT_RETRY_CHURN`
+- `CONTEXT_OVERLOAD`
+- `TOOL_OUTPUT_FLOOD`
+- `MISSING_SETUP`
+- `NO_PROGRESS_THRASHING`
+- `MODEL_FALLBACK_DEGRADATION`
+- `INTERRUPTED_TAIL`
+
+Confidence is a fixed evidence-strength label: `high`, `medium`, or `low`.
+It is not a probability.
+
+Ruleset v2 narrows high-noise cases:
+
+- context growth ignores zero-start and `TOKEN_USAGE_UNRELIABLE` token points;
+- setup diagnosis treats ordinary non-zero shell exits as weak evidence unless
+  they are paired with stronger provider/session failure signals;
+- no-progress diagnosis only counts mutating file tools, not read-only file
+  inspection;
+- model fallback diagnosis requires minimum before/after samples and absolute
+  after-switch failures;
+- project review defaults to the most recent 200 matching sessions. Use
+  `aicg review --project <path> --limit 0` for an explicit full-history review.

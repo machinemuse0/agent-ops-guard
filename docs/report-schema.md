@@ -46,3 +46,38 @@ Cost is computed from the canonical buckets:
 
 `reasoning_output_per_mtok_usd` is deprecated because reasoning output is
 already included in `output_tokens`.
+
+## Review Schema v1
+
+`aicg review` emits `schemaVersion = 1` and `rulesetVersion = 1`.
+
+Session review JSON uses:
+
+```json
+{
+  "schemaVersion": 1,
+  "rulesetVersion": 1,
+  "kind": "session",
+  "session": {},
+  "findings": [],
+  "beforeNextRun": []
+}
+```
+
+Batch review uses `kind = "batch"` with `sessions` and flattened `findings`.
+Project review uses `kind = "project"` with aggregated `patterns`.
+
+Finding rows contain `code`, `confidence`, `detail`, `recommendation`, and
+`evidence`. Evidence rows contain only ids, source hash, line range,
+metric key/value, and message hash. Review outputs do not contain dynamic
+timestamps or raw prompt/code/output excerpts.
+
+Users can explicitly resolve a local source hash with:
+
+```bash
+python -m aicg inspect source <source_file_hash>
+```
+
+SQLite schema v6 stores review diagnostics in derived tables
+`review_findings` and `review_evidence`; `aicg rebuild` may delete and recreate
+them from normalized sessions, turns, and tool events.

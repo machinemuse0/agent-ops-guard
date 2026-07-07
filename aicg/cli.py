@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import __version__
 from .analyzer import analyze_sessions
 from .config import app_paths, ensure_app_dirs, load_config
 from .db import (
@@ -22,6 +23,7 @@ from .db import (
     init_db,
     insert_run,
     replace_issues_for_sessions,
+    replace_review_findings_for_sessions,
     reset_derived_tables,
     scan_state_for,
     upsert_git_activity,
@@ -44,16 +46,33 @@ from .policy import (
 from .pricing import apply_pricing
 from .readers import default_registry
 from .reporter import build_daily_report, render_markdown_report
+from .review import (
+    CONFIDENCE_ORDER,
+    build_batch_review_model,
+    build_project_review_model,
+    build_session_review_model,
+    build_session_review,
+    load_review_config,
+    render_issue_template,
+    render_review_json,
+    render_review_markdown,
+)
 from .util import (
+    detect_privacy_flags,
+    escape_markdown_text,
     file_mtime_after,
     hash_file,
     isoformat_utc,
+    markdown_code,
     parse_since,
     redact_secrets,
     sha256_text,
     stable_id,
     utc_now_iso,
 )
+
+
+DEFAULT_PROJECT_REVIEW_LIMIT = 200
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m aicg")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--debug", action="store_true", help="Show full tracebacks for runtime errors")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -128,6 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_session_parser.add_argument("session_id")
     inspect_session_parser.add_argument("--format", choices=["md", "json"], default="md")
     inspect_session_parser.set_defaults(func=cmd_inspect_session)
+    inspect_source_parser = inspect_subparsers.add_parser("source", help="Resolve a source file hash")
+    inspect_source_parser.add_argument("source_file_hash")
+    inspect_source_parser.add_argument("--format", choices=["md", "json"], default="md")
+    inspect_source_parser.set_defaults(func=cmd_inspect_source)
 
     export_parser = subparsers.add_parser("export", help="Export normalized metadata")
     export_parser.add_argument(
@@ -155,6 +179,23 @@ def build_parser() -> argparse.ArgumentParser:
     policy_ack.add_argument("finding_id")
     policy_ack.add_argument("--reason")
     policy_ack.set_defaults(func=cmd_policy_ack)
+
+    review_parser = subparsers.add_parser("review", help="Diagnose failed or wasteful sessions")
+    review_parser.add_argument("--session", help="Review one session id")
+    review_parser.add_argument("--last", action="store_true", help="Review the most recent session")
+    review_parser.add_argument("--since", help="Review sessions since a relative or ISO time")
+    review_parser.add_argument("--top", type=int, help="Review top N sessions by wasted cost and recency")
+    review_parser.add_argument("--project", help="Aggregate recurring review patterns for a project path")
+    review_parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_PROJECT_REVIEW_LIMIT,
+        help="Maximum recent project sessions to review; 0 reviews all matching sessions",
+    )
+    review_parser.add_argument("--format", choices=["md", "json"], default="md")
+    review_parser.add_argument("--fail-on", choices=["high", "medium", "low", "none"], default="high")
+    review_parser.add_argument("--export-issue", help="Write a no-raw Markdown issue template for a single session review")
+    review_parser.set_defaults(func=cmd_review)
 
     git_parser = subparsers.add_parser("git", help="Read local git activity")
     git_subparsers = git_parser.add_subparsers(dest="git_command", required=True)
@@ -433,6 +474,21 @@ def cmd_inspect_session(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_inspect_source(args: argparse.Namespace) -> int:
+    paths = app_paths()
+    init_db(paths["db"])
+    with connect(paths["db"]) as conn:
+        model = _inspect_source_model(conn, args.source_file_hash)
+    if not model["sources"]:
+        print(f"error: source hash not found: {args.source_file_hash}", file=sys.stderr)
+        return 1
+    if args.format == "json":
+        print(json.dumps(model, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(_render_inspect_source_markdown(model))
+    return 0
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     paths = app_paths()
     init_db(paths["db"])
@@ -510,10 +566,87 @@ def cmd_policy_ack(args: argparse.Namespace) -> int:
         if exists is None:
             print(f"error: policy finding not found: {args.finding_id}", file=sys.stderr)
             return 1
-        ack_policy_finding(conn, args.finding_id, args.reason)
+        ack_policy_finding(conn, args.finding_id, _sanitize_policy_ack_reason(args.reason))
         conn.commit()
     print(f"policy finding acknowledged: {args.finding_id}")
     return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    paths = app_paths()
+    ensure_app_dirs()
+    init_db(paths["db"])
+    review_config = load_review_config(load_config())
+    if args.top is not None and args.top <= 0:
+        print("error: --top must be positive", file=sys.stderr)
+        return 2
+    if args.limit < 0:
+        print("error: --limit must be zero or positive", file=sys.stderr)
+        return 2
+    if not args.project and args.limit != DEFAULT_PROJECT_REVIEW_LIMIT:
+        print("error: --limit is only valid with --project", file=sys.stderr)
+        return 2
+    single_selector_count = sum(1 for selected in (args.session, args.last) if selected)
+    if single_selector_count and (args.project or args.since or args.top):
+        print("error: --session/--last cannot be combined with --project, --since, or --top", file=sys.stderr)
+        return 2
+    if args.project and args.export_issue:
+        print("error: --export-issue is only valid for --session or --last", file=sys.stderr)
+        return 2
+    if not (args.session or args.last or args.project or args.since or args.top):
+        print("error: review requires --session, --last, --project, --since, or --top", file=sys.stderr)
+        return 2
+
+    with connect(paths["db"]) as conn:
+        if args.session or args.last:
+            session_id = args.session or _last_session_id(conn)
+            if session_id is None:
+                print("error: session not found", file=sys.stderr)
+                return 1
+            review = build_session_review(conn, session_id, review_config)
+            if review is None:
+                print(f"error: session not found: {session_id}", file=sys.stderr)
+                return 1
+            replace_review_findings_for_sessions(conn, [session_id], review.findings)
+            conn.commit()
+            model = build_session_review_model(review)
+            if args.export_issue:
+                out_path = _review_output_path(paths, args.export_issue)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(render_issue_template(review) + "\n", encoding="utf-8")
+                print(f"review issue template written: {out_path}", file=sys.stderr)
+            output = render_review_json(model) if args.format == "json" else render_review_markdown(model)
+            print(output)
+            return _review_exit_code(model, args.fail_on)
+
+        if args.project:
+            since = args.since or "7d"
+            cutoff_iso = isoformat_utc(parse_since(since))
+            session_ids, matched_sessions, truncated = _project_review_session_ids(conn, args.project, cutoff_iso, args.limit)
+            reviews = _build_and_store_reviews(conn, session_ids, review_config)
+            model = build_project_review_model(
+                args.project,
+                reviews,
+                since=since,
+                limit=args.limit,
+                matched_sessions=matched_sessions,
+                truncated=truncated,
+            )
+            conn.commit()
+            output = render_review_json(model) if args.format == "json" else render_review_markdown(model)
+            print(output)
+            return _review_exit_code(model, args.fail_on)
+
+        since = args.since or "24h"
+        top = args.top or 5
+        cutoff_iso = isoformat_utc(parse_since(since))
+        session_ids = _top_review_session_ids(conn, cutoff_iso, top)
+        reviews = _build_and_store_reviews(conn, session_ids, review_config)
+        model = build_batch_review_model(reviews, since=since, top=top)
+        conn.commit()
+        output = render_review_json(model) if args.format == "json" else render_review_markdown(model)
+        print(output)
+        return _review_exit_code(model, args.fail_on)
 
 
 def cmd_git_link(args: argparse.Namespace) -> int:
@@ -560,6 +693,133 @@ def _parse_scan_since(value: str):
     if value == "all":
         return dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
     return parse_since(value)
+
+
+def _last_session_id(conn) -> str | None:
+    row = conn.execute(
+        """
+        SELECT id
+        FROM sessions
+        ORDER BY COALESCE(started_at, created_at, '') DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def _top_review_session_ids(conn, cutoff_iso: str, top: int) -> list[str]:
+    return [
+        row["id"]
+        for row in conn.execute(
+            """
+            SELECT
+                s.id,
+                COALESCE(
+                    (
+                        SELECT SUM(
+                            input_uncached_tokens
+                            + cache_creation_input_tokens
+                            + cache_read_input_tokens
+                            + output_tokens
+                        )
+                        FROM turns t
+                        WHERE t.session_id = s.id
+                    ),
+                    0
+                ) AS total_tokens,
+                COALESCE(
+                    (
+                        SELECT SUM(output_bytes)
+                        FROM tool_events te
+                        WHERE te.session_id = s.id
+                    ),
+                    0
+                ) AS tool_output_bytes
+            FROM sessions s
+            WHERE COALESCE(s.started_at, s.created_at) >= ?
+            ORDER BY
+                s.wasted_cost_usd IS NULL,
+                s.wasted_cost_usd DESC,
+                CASE s.status
+                    WHEN 'failed' THEN 3
+                    WHEN 'interrupted' THEN 2
+                    ELSE 0
+                END DESC,
+                COALESCE(s.retry_count, 0) DESC,
+                total_tokens DESC,
+                tool_output_bytes DESC,
+                COALESCE(s.started_at, s.created_at, '') DESC,
+                s.id
+            LIMIT ?
+            """,
+            (cutoff_iso, top),
+        ).fetchall()
+    ]
+
+
+def _project_review_session_ids(conn, project_path: str, cutoff_iso: str, limit: int) -> tuple[list[str], int, bool]:
+    matched = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS sessions
+            FROM sessions
+            WHERE project_path = ? AND COALESCE(started_at, created_at) >= ?
+            """,
+            (project_path, cutoff_iso),
+        ).fetchone()["sessions"]
+        or 0
+    )
+    params: tuple = (project_path, cutoff_iso)
+    limit_clause = ""
+    if limit > 0:
+        limit_clause = "LIMIT ?"
+        params = (project_path, cutoff_iso, limit)
+    rows = conn.execute(
+        f"""
+        SELECT id
+        FROM sessions
+        WHERE project_path = ? AND COALESCE(started_at, created_at) >= ?
+        ORDER BY COALESCE(started_at, created_at, '') DESC, id DESC
+        {limit_clause}
+        """,
+        params,
+    ).fetchall()
+    session_ids = [row["id"] for row in reversed(rows)]
+    return session_ids, matched, limit > 0 and matched > len(session_ids)
+
+
+def _build_and_store_reviews(conn, session_ids: list[str], review_config) -> list:
+    reviews = []
+    all_findings = []
+    for session_id in session_ids:
+        review = build_session_review(conn, session_id, review_config)
+        if review is None:
+            continue
+        reviews.append(review)
+        all_findings.extend(review.findings)
+    replace_review_findings_for_sessions(conn, session_ids, all_findings)
+    return reviews
+
+
+def _review_exit_code(model: dict, fail_on: str) -> int:
+    if fail_on == "none":
+        return 0
+    threshold = CONFIDENCE_ORDER[fail_on]
+    if model.get("kind") == "project":
+        rows = model.get("patterns") or []
+    else:
+        rows = model.get("findings") or []
+    for row in rows:
+        if CONFIDENCE_ORDER.get(str(row.get("confidence")), 0) >= threshold:
+            return 3
+    return 0
+
+
+def _review_output_path(paths: dict[str, Path], value: str) -> Path:
+    out_path = Path(value).expanduser()
+    if not out_path.is_absolute():
+        out_path = paths["reports"] / out_path
+    return out_path
 
 
 def _known_scan_sources(conn) -> set[str]:
@@ -940,19 +1200,56 @@ def _inspect_session_model(conn, session_id: str) -> dict | None:
     }
 
 
+def _inspect_source_model(conn, source_file_hash: str) -> dict:
+    rows = conn.execute(
+        """
+        SELECT source_file_hash, source_file, provider,
+               COUNT(DISTINCT id) AS sessions,
+               MIN(COALESCE(started_at, created_at)) AS first_seen_at,
+               MAX(COALESCE(started_at, created_at)) AS last_seen_at,
+               MIN(source_line_start) AS source_line_start,
+               MAX(source_line_end) AS source_line_end
+        FROM sessions
+        WHERE source_file_hash = ?
+        GROUP BY source_file_hash, source_file, provider
+        ORDER BY source_file, provider
+        """,
+        (source_file_hash,),
+    ).fetchall()
+    sources = []
+    for row in rows:
+        path = Path(row["source_file"]) if row["source_file"] else None
+        sources.append(
+            {
+                "sourceFileHash": row["source_file_hash"],
+                "sourceFile": row["source_file"],
+                "provider": row["provider"],
+                "sessions": int(row["sessions"] or 0),
+                "firstSeenAt": row["first_seen_at"],
+                "lastSeenAt": row["last_seen_at"],
+                "sourceLineStart": row["source_line_start"],
+                "sourceLineEnd": row["source_line_end"],
+                "exists": bool(path and path.exists()),
+            }
+        )
+    return {"schemaVersion": 1, "sourceFileHash": source_file_hash, "sources": sources}
+
+
 def _render_inspect_session_markdown(model: dict) -> str:
     session = model["session"]
     aggregates = model["aggregates"]
+    source_lines = f"{session.get('source_line_start') or 'unknown'}-{session.get('source_line_end') or 'unknown'}"
     lines = [
         "# AgentOps Guard Session Inspect",
         "",
-        f"- Session: `{session['id']}`",
-        f"- Provider: {session['provider']}",
-        f"- Project: `{session.get('project_path') or 'unknown'}`",
-        f"- Status: {session.get('status') or 'unknown'}",
-        f"- Model: {session.get('model') or 'unknown'}",
-        f"- Source hash: `{session.get('source_file_hash') or 'unknown'}`",
-        f"- Source lines: {session.get('source_line_start') or 'unknown'}-{session.get('source_line_end') or 'unknown'}",
+        f"- Session: {_md_code(session['id'])}",
+        f"- Provider: {_md_text(session['provider'])}",
+        f"- Project: {_md_code(session.get('project_path') or 'unknown')}",
+        f"- Status: {_md_text(session.get('status') or 'unknown')}",
+        f"- Model: {_md_text(session.get('model') or 'unknown')}",
+        f"- Source hash: {_md_code(session.get('source_file_hash') or 'unknown')}",
+        f"- Resolve source: `python -m aicg inspect source {session.get('source_file_hash') or 'unknown'}`",
+        f"- Source lines: {_md_text(source_lines)}",
         "",
         "## Aggregates",
         f"- Turns: {aggregates['turns']}",
@@ -964,17 +1261,35 @@ def _render_inspect_session_markdown(model: dict) -> str:
     ]
     if model["issues"]:
         for issue in model["issues"]:
-            lines.append(f"- `{issue['code']}` [{issue['severity']}]: {issue['title']}")
+            lines.append(f"- {_md_code(issue['code'])} [{_md_text(issue['severity'])}]: {_md_text(issue['title'])}")
     else:
         lines.append("- none")
     lines.extend(["", "## Evidence pointers"])
     if model["evidence"]:
         for evidence in model["evidence"]:
+            evidence_lines = f"{evidence.get('source_line_start') or 'unknown'}-{evidence.get('source_line_end') or 'unknown'}"
             lines.append(
-                f"- `{evidence['issue_id']}` {evidence['metric_name']}={evidence['metric_value']} source={evidence.get('source_file_hash') or 'unknown'} lines={evidence.get('source_line_start') or 'unknown'}-{evidence.get('source_line_end') or 'unknown'}"
+                f"- {_md_code(evidence['issue_id'])} {_md_text(evidence['metric_name'])}={_md_text(evidence['metric_value'])} source={_md_code(evidence.get('source_file_hash') or 'unknown')} lines={_md_text(evidence_lines)}"
             )
     else:
         lines.append("- none")
+    return "\n".join(lines)
+
+
+def _render_inspect_source_markdown(model: dict) -> str:
+    lines = [
+        "# AgentOps Guard Source Inspect",
+        "",
+        f"- Source hash: {_md_code(model['sourceFileHash'])}",
+        "",
+        "| Source file | Provider | Exists | Sessions | First seen | Last seen | Lines |",
+        "| --- | --- | --- | ---: | --- | --- | --- |",
+    ]
+    for row in model["sources"]:
+        line_range = f"{row.get('sourceLineStart') or 'unknown'}-{row.get('sourceLineEnd') or 'unknown'}"
+        lines.append(
+            f"| {_md_code(row.get('sourceFile') or 'unknown')} | {_md_text(row.get('provider') or 'unknown')} | {_md_text(str(row.get('exists')))} | {row['sessions']} | {_md_text(row.get('firstSeenAt') or 'unknown')} | {_md_text(row.get('lastSeenAt') or 'unknown')} | {_md_text(line_range)} |"
+        )
     return "\n".join(lines)
 
 
@@ -1065,6 +1380,14 @@ def _row_dict(row) -> dict:
     return {key: row[key] for key in row.keys()}
 
 
+def _md_text(value: object) -> str:
+    return escape_markdown_text(value)
+
+
+def _md_code(value: object) -> str:
+    return markdown_code(value)
+
+
 def _jsonl_files_since(root: Path, cutoff) -> list[Path]:
     if not root.exists():
         return []
@@ -1132,3 +1455,19 @@ def _sanitize_command(command: list[str]) -> str:
             safe = "[redacted-arg]"
         sanitized.append(safe)
     return shlex.join(sanitized)
+
+
+def _sanitize_policy_ack_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    normalized = " ".join(str(reason).split())
+    if not normalized:
+        return None
+    redacted = redact_with_policy(redact_secrets(normalized), load_policy())
+    safe_ascii = all(
+        char.isascii() and (char.isalnum() or char in " _.,:/@+-")
+        for char in normalized
+    )
+    if redacted != normalized or detect_privacy_flags(normalized) or len(normalized) > 120 or not safe_ascii:
+        return f"sha256:{sha256_text(normalized)}"
+    return normalized

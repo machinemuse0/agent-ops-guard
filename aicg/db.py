@@ -12,12 +12,14 @@ from .models import (
     NormalizedTurn,
     ParsedRecords,
     PolicyFinding,
+    ReviewEvidence,
+    ReviewFinding,
 )
 from .sqlite_utils import chunked
 from .util import sha256_text, stable_id, utc_now_iso
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 DERIVED_TABLES = {
@@ -29,6 +31,8 @@ DERIVED_TABLES = {
     "scan_errors",
     "scan_state",
     "policy_findings",
+    "review_findings",
+    "review_evidence",
     "git_activity",
 }
 
@@ -200,6 +204,32 @@ CREATE TABLE IF NOT EXISTS policy_acks (
     acked_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS review_findings (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    ruleset_version INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    recommendation TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS review_evidence (
+    id TEXT PRIMARY KEY,
+    finding_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    turn_id TEXT,
+    tool_event_id TEXT,
+    source_file_hash TEXT,
+    source_line_start INTEGER,
+    source_line_end INTEGER,
+    metric_name TEXT,
+    metric_value TEXT,
+    message_hash TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS report_snapshots (
     period_type TEXT NOT NULL,
     period_start TEXT NOT NULL,
@@ -241,6 +271,10 @@ CREATE INDEX IF NOT EXISTS idx_scan_errors_source ON scan_errors(provider, sourc
 CREATE INDEX IF NOT EXISTS idx_scan_state_provider ON scan_state(provider);
 CREATE INDEX IF NOT EXISTS idx_policy_findings_session_id ON policy_findings(session_id);
 CREATE INDEX IF NOT EXISTS idx_policy_findings_level ON policy_findings(level);
+CREATE INDEX IF NOT EXISTS idx_review_findings_session_id ON review_findings(session_id);
+CREATE INDEX IF NOT EXISTS idx_review_findings_code ON review_findings(code);
+CREATE INDEX IF NOT EXISTS idx_review_evidence_finding_id ON review_evidence(finding_id);
+CREATE INDEX IF NOT EXISTS idx_review_evidence_session_id ON review_evidence(session_id);
 CREATE INDEX IF NOT EXISTS idx_git_activity_project_period ON git_activity(project_path, period_start);
 """
 
@@ -400,6 +434,30 @@ REQUIRED_COLUMNS = {
         "last_seen_at",
     },
     "policy_acks": {"finding_id", "reason", "acked_at"},
+    "review_findings": {
+        "id",
+        "session_id",
+        "ruleset_version",
+        "code",
+        "confidence",
+        "detail",
+        "recommendation",
+        "created_at",
+    },
+    "review_evidence": {
+        "id",
+        "finding_id",
+        "session_id",
+        "turn_id",
+        "tool_event_id",
+        "source_file_hash",
+        "source_line_start",
+        "source_line_end",
+        "metric_name",
+        "metric_value",
+        "message_hash",
+        "created_at",
+    },
     "report_snapshots": {"period_type", "period_start", "report_json", "report_hash", "created_at"},
     "git_links": {"repo_path", "project_path", "linked_at"},
     "git_activity": {
@@ -837,6 +895,102 @@ def replace_issues_for_sessions(
             )
     for issue in issues:
         upsert_issue(conn, issue)
+
+
+def replace_review_findings_for_sessions(
+    conn: sqlite3.Connection,
+    session_ids: list[str],
+    findings: list[ReviewFinding],
+) -> None:
+    if session_ids:
+        for batch in chunked(session_ids):
+            placeholders = ",".join("?" for _ in batch)
+            existing = conn.execute(
+                f"SELECT id FROM review_findings WHERE session_id IN ({placeholders})",
+                tuple(batch),
+            ).fetchall()
+            finding_ids = [row["id"] for row in existing]
+            for finding_batch in chunked(finding_ids):
+                finding_placeholders = ",".join("?" for _ in finding_batch)
+                conn.execute(
+                    f"DELETE FROM review_evidence WHERE finding_id IN ({finding_placeholders})",
+                    tuple(finding_batch),
+                )
+            conn.execute(
+                f"DELETE FROM review_findings WHERE session_id IN ({placeholders})",
+                tuple(batch),
+            )
+    for finding in findings:
+        upsert_review_finding(conn, finding)
+
+
+def upsert_review_finding(conn: sqlite3.Connection, finding: ReviewFinding) -> None:
+    conn.execute(
+        """
+        INSERT INTO review_findings (
+            id, session_id, ruleset_version, code, confidence, detail,
+            recommendation, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            session_id=excluded.session_id,
+            ruleset_version=excluded.ruleset_version,
+            code=excluded.code,
+            confidence=excluded.confidence,
+            detail=excluded.detail,
+            recommendation=excluded.recommendation,
+            created_at=excluded.created_at
+        """,
+        (
+            finding.id,
+            finding.session_id,
+            finding.ruleset_version,
+            finding.code,
+            finding.confidence,
+            finding.detail,
+            finding.recommendation,
+            finding.created_at,
+        ),
+    )
+    for pointer in finding.evidence_pointers:
+        upsert_review_evidence(conn, pointer)
+
+
+def upsert_review_evidence(conn: sqlite3.Connection, pointer: ReviewEvidence) -> None:
+    conn.execute(
+        """
+        INSERT INTO review_evidence (
+            id, finding_id, session_id, turn_id, tool_event_id, source_file_hash,
+            source_line_start, source_line_end, metric_name, metric_value,
+            message_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            finding_id=excluded.finding_id,
+            session_id=excluded.session_id,
+            turn_id=excluded.turn_id,
+            tool_event_id=excluded.tool_event_id,
+            source_file_hash=excluded.source_file_hash,
+            source_line_start=excluded.source_line_start,
+            source_line_end=excluded.source_line_end,
+            metric_name=excluded.metric_name,
+            metric_value=excluded.metric_value,
+            message_hash=excluded.message_hash,
+            created_at=excluded.created_at
+        """,
+        (
+            pointer.id,
+            pointer.finding_id,
+            pointer.session_id,
+            pointer.turn_id,
+            pointer.tool_event_id,
+            pointer.source_file_hash,
+            pointer.source_line_start,
+            pointer.source_line_end,
+            pointer.metric_name,
+            pointer.metric_value,
+            pointer.message_hash,
+            pointer.created_at,
+        ),
+    )
 
 
 def insert_run(

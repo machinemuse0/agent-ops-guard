@@ -23,6 +23,8 @@ REQUIRED_TABLES = {
     "scan_state",
     "policy_findings",
     "policy_acks",
+    "review_findings",
+    "review_evidence",
     "report_snapshots",
     "git_links",
     "git_activity",
@@ -42,6 +44,8 @@ REQUIRED_INDEXES = {
     "idx_turns_native_turn_key",
     "idx_scan_state_provider",
     "idx_policy_findings_session_id",
+    "idx_review_findings_session_id",
+    "idx_review_evidence_finding_id",
     "idx_git_activity_project_period",
 }
 
@@ -162,6 +166,17 @@ def _check_db(path: Path) -> list[dict[str, Any]]:
                     "privacy.policy_findings_hash_only",
                     "fail" if "detail" in columns or "raw_payload" in columns else "pass",
                     "policy_findings stores hashes only" if "detail" not in columns and "raw_payload" not in columns else "policy_findings has raw detail column",
+                )
+            )
+        if "review_evidence" in tables:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(review_evidence)")}
+            raw_columns = {"raw_payload", "raw_text", "message", "command", "output"} & columns
+            checks.append(
+                _check(
+                    "privacy.review_evidence_hash_only",
+                    "fail" if raw_columns else "pass",
+                    "review_evidence stores hashes and pointers only" if not raw_columns else "review_evidence has raw content columns",
+                    columns=sorted(raw_columns),
                 )
             )
         checks.append(_check_report_consistency(conn, tables))

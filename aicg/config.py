@@ -23,6 +23,21 @@ DEFAULT_CONFIG = {
         "large_history_file_bytes": 104857600,
     },
     "prices": {},
+    "review": {
+        "repeated_error_hash_min": 3,
+        "edit_failure_run_min": 3,
+        "context_growth_min_turns": 5,
+        "context_growth_multiple": 3.0,
+        "context_cache_drop_min": 0.15,
+        "tool_output_spike_min_bytes": 102400,
+        "tool_output_spike_multiplier": 5.0,
+        "tool_output_failure_window_turns": 2,
+        "early_shell_window": 5,
+        "early_shell_failure_score": 2.0,
+        "no_progress_min_turns": 20,
+        "no_progress_edit_success_max": 0.3,
+        "model_fallback_failure_multiplier": 2.0,
+    },
 }
 
 
@@ -54,6 +69,21 @@ large_history_file_bytes = 104857600
 # cache_creation_input_per_mtok_usd = 0
 # cache_read_input_per_mtok_usd = 0
 # credit_per_usd = 1
+
+[review]
+repeated_error_hash_min = 3
+edit_failure_run_min = 3
+context_growth_min_turns = 5
+context_growth_multiple = 3.0
+context_cache_drop_min = 0.15
+tool_output_spike_min_bytes = 102400
+tool_output_spike_multiplier = 5.0
+tool_output_failure_window_turns = 2
+early_shell_window = 5
+early_shell_failure_score = 2.0
+no_progress_min_turns = 20
+no_progress_edit_success_max = 0.3
+model_fallback_failure_multiplier = 2.0
 """
 
 
@@ -121,6 +151,7 @@ def load_config(app_dir: Path | None = None) -> dict:
     config = {
         "thresholds": dict(DEFAULT_CONFIG["thresholds"]),
         "prices": dict(DEFAULT_CONFIG["prices"]),
+        "review": dict(DEFAULT_CONFIG["review"]),
     }
     if paths["config"].exists():
         with paths["config"].open("rb") as handle:

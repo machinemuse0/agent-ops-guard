@@ -102,6 +102,35 @@ class PolicyFinding:
 
 
 @dataclass
+class ReviewFinding:
+    id: str
+    session_id: str
+    ruleset_version: int
+    code: str
+    confidence: str
+    detail: str
+    recommendation: str
+    created_at: str = ""
+    evidence_pointers: list["ReviewEvidence"] = field(default_factory=list)
+
+
+@dataclass
+class ReviewEvidence:
+    id: str
+    finding_id: str
+    session_id: str
+    turn_id: str | None = None
+    tool_event_id: str | None = None
+    source_file_hash: str | None = None
+    source_line_start: int | None = None
+    source_line_end: int | None = None
+    metric_name: str | None = None
+    metric_value: str | None = None
+    message_hash: str | None = None
+    created_at: str = ""
+
+
+@dataclass
 class Issue:
     id: str
     session_id: str | None

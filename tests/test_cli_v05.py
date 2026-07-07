@@ -64,7 +64,8 @@ def test_cli_policy_check_and_ack(tmp_path):
     check = subprocess.run(base + ["policy", "check", "--since", "9999d", "--format", "json"], cwd=Path.cwd(), env=env, text=True, capture_output=True)
     with sqlite3.connect(aicg_home / "aicg.sqlite") as conn:
         finding_id = conn.execute("SELECT id FROM policy_findings LIMIT 1").fetchone()[0]
-    ack = subprocess.run(base + ["policy", "ack", finding_id, "--reason", "approved"], cwd=Path.cwd(), env=env, text=True, capture_output=True)
+    secret_reason = "OPENAI_API_KEY=sk-test012345678901234567890123456789"
+    ack = subprocess.run(base + ["policy", "ack", finding_id, "--reason", secret_reason], cwd=Path.cwd(), env=env, text=True, capture_output=True)
     check_after_ack = subprocess.run(base + ["policy", "check", "--since", "9999d"], cwd=Path.cwd(), env=env, text=True, capture_output=True)
 
     assert scan.returncode == 0, scan.stderr
@@ -72,6 +73,10 @@ def test_cli_policy_check_and_ack(tmp_path):
     assert json.loads(check.stdout)["findings"][0]["level"] == "violation"
     assert ack.returncode == 0, ack.stderr
     assert check_after_ack.returncode == 0
+    with sqlite3.connect(aicg_home / "aicg.sqlite") as conn:
+        stored_reason = conn.execute("SELECT reason FROM policy_acks WHERE finding_id = ?", (finding_id,)).fetchone()[0]
+    assert secret_reason not in stored_reason
+    assert stored_reason.startswith("sha256:")
 
 
 def test_policy_check_ignores_output_url_mentions(tmp_path):

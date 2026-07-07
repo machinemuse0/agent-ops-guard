@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
-import html
 from typing import Any
 
 from .sqlite_utils import chunked
 from .tokens import total_tokens as provider_total_tokens
-from .util import isoformat_utc, parse_since, split_flags, utc_now_iso
+from .util import escape_markdown_text, isoformat_utc, markdown_code, parse_since, split_flags, utc_now_iso
 
 
 DAILY_REPORT_SCHEMA_VERSION = 3
@@ -241,6 +240,8 @@ def render_markdown_report(report: dict[str, Any]) -> str:
                 lines.append(f"  Detail: {issue['detail']}")
             if issue["recommendation"]:
                 lines.append(f"  Recommendation: {issue['recommendation']}")
+            if issue["sessionId"]:
+                lines.append(f"  Review: run `aicg review --session {issue['sessionId']}` for diagnosis.")
     elif report.get("lowerRiskIssueCount", 0):
         lines.append("No high-risk issues detected.")
         lines.append(f"{report['lowerRiskIssueCount']} lower-severity issue(s) are available in SQLite.")
@@ -854,12 +855,8 @@ def _percent_or_unavailable(value: object) -> str:
 
 
 def _md_text(value: object) -> str:
-    return str(value if value is not None else "unknown").replace("\n", " ").replace("|", r"\|")
+    return escape_markdown_text(value)
 
 
 def _md_code(value: object) -> str:
-    text = _md_text(value)
-    if "`" not in text:
-        return f"`{text}`"
-    escaped = html.escape(str(value if value is not None else "unknown")).replace("|", "&#124;")
-    return f"<code>{escaped}</code>"
+    return markdown_code(value)

@@ -4,10 +4,28 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
+
+import aicg
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_cli_version_matches_package_metadata():
+    result = subprocess.run(
+        [sys.executable, "-m", "aicg", "--version"],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+    )
+    pyproject = tomllib.loads((Path.cwd() / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert result.returncode == 0, result.stderr
+    assert aicg.__version__ == "0.6.0"
+    assert pyproject["project"]["version"] == aicg.__version__
+    assert aicg.__version__ in result.stdout
 
 
 def test_cli_scan_summary_and_doctor_outputs(tmp_path):

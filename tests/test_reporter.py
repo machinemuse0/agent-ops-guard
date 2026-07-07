@@ -290,10 +290,10 @@ def test_reporter_escapes_markdown_table_cells(tmp_path):
             NormalizedSession(
                 id="session-md",
                 provider="codex",
-                project_path="/tmp/a|b",
+                project_path="/tmp/a|b<script>alert(1)</script>",
                 started_at=now,
                 status="completed",
-                model="gpt|5",
+                model="<script>alert(1)</script>",
                 created_at=now,
             ),
         )
@@ -305,8 +305,8 @@ def test_reporter_escapes_markdown_table_cells(tmp_path):
                 provider="codex",
                 started_at=now,
                 status="completed",
-                model="gpt|5",
-                task_type="review|inject",
+                model="<script>alert(1)</script>",
+                task_type="![x](https://evil.example/x.png)|inject",
                 input_tokens=100,
             ),
         )
@@ -318,7 +318,7 @@ def test_reporter_escapes_markdown_table_cells(tmp_path):
                 turn_id="turn-md",
                 provider="codex",
                 tool_type="shell",
-                tool_name="name|with|pipes",
+                tool_name="![x](https://evil.example/x.png)|pipes",
                 status="completed",
                 started_at=now,
                 ended_at=now,
@@ -329,9 +329,10 @@ def test_reporter_escapes_markdown_table_cells(tmp_path):
 
         report = generate_markdown_report(conn, since="24h")
 
-    assert "a\\|b" in report
-    assert "gpt\\|5" in report
-    assert "name\\|with\\|pipes" in report
+    assert "<script" not in report
+    assert "&lt;script&gt;alert\\(1\\)&lt;/script&gt;" in report
+    assert "/tmp/a&#124;b&lt;script&gt;alert\\(1\\)&lt;/script&gt;" in report
+    assert "![x](" not in report
 
 
 def test_reporter_chunks_large_session_sets(tmp_path):
