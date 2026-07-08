@@ -23,6 +23,7 @@ from ..util import (
     flags_to_text,
     hash_file,
     normalize_timestamp,
+    raw_hash_file,
     redact_secrets,
     sha256_text,
     stable_id,
@@ -62,6 +63,7 @@ class ClaudeJsonlReader:
     def read(self, path: Path) -> ParsedRecords:
         source = Path(path)
         source_hash = hash_file(source)
+        source_identity_hash = raw_hash_file(source)
         created_at = utc_now_iso()
         session: NormalizedSession | None = None
         turns: list[NormalizedTurn] = []
@@ -104,13 +106,13 @@ class ClaudeJsonlReader:
             session_id = stable_id(
                 "session",
                 self.provider,
-                raw_session_id or source_hash,
+                raw_session_id or source_identity_hash,
             )
             session = NormalizedSession(
                 id=session_id,
                 provider=self.provider,
                 native_session_id=raw_session_id,
-                lineage_id=raw_session_id or source_hash,
+                lineage_id=raw_session_id or source_identity_hash,
                 project_path=_first_str(event, "cwd") or _project_from_path(source),
                 source_file=str(source),
                 source_file_hash=source_hash,
@@ -172,12 +174,12 @@ class ClaudeJsonlReader:
                             else stable_id(
                                 "turn",
                                 active_session.id,
-                                source_hash,
+                                source_identity_hash,
                                 len(turns) + 1,
                             ),
                             session_id=active_session.id,
                             provider=self.provider,
-                            native_turn_key=f"{self.provider}:{raw_message_id}" if raw_message_id else f"{self.provider}:{source_hash}:{len(turns) + 1}",
+                            native_turn_key=f"{self.provider}:{raw_message_id}" if raw_message_id else f"{self.provider}:{source_identity_hash}:{len(turns) + 1}",
                             source_file_hash=source_hash,
                             source_line_start=current_line_number,
                             source_line_end=current_line_number,

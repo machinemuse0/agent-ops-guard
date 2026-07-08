@@ -1,0 +1,9 @@
+{
+  "title": "AgentOps Guard Export Output",
+  "schemaVersion": 1,
+  "required": [
+    "formatVersion",
+    "kind",
+    "rows"
+  ]
+}

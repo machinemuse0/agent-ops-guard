@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 import shutil
+import secrets
 from pathlib import Path
 
 from .models import (
+    AlertEvent,
     EvidencePointer,
     Issue,
     NormalizedSession,
@@ -16,10 +18,10 @@ from .models import (
     ReviewFinding,
 )
 from .sqlite_utils import chunked
-from .util import sha256_text, stable_id, utc_now_iso
+from .util import set_hash_salt, sha256_text, stable_id, utc_now_iso
 
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 8
 
 
 DERIVED_TABLES = {
@@ -37,7 +39,7 @@ DERIVED_TABLES = {
 }
 
 
-USER_TABLES = {"runs", "report_snapshots", "policy_acks", "git_links"}
+USER_TABLES = {"runs", "report_snapshots", "policy_acks", "git_links", "alert_events"}
 
 
 SCHEMA_SQL = """
@@ -235,8 +237,21 @@ CREATE TABLE IF NOT EXISTS report_snapshots (
     period_start TEXT NOT NULL,
     report_json TEXT NOT NULL,
     report_hash TEXT NOT NULL,
+    dashboard_model_json TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY (period_type, period_start)
+);
+
+CREATE TABLE IF NOT EXISTS alert_events (
+    id TEXT PRIMARY KEY,
+    period_type TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    alert_key TEXT NOT NULL,
+    threshold_value REAL NOT NULL,
+    actual_value REAL,
+    report_hash TEXT,
+    config_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS git_links (
@@ -276,6 +291,7 @@ CREATE INDEX IF NOT EXISTS idx_review_findings_code ON review_findings(code);
 CREATE INDEX IF NOT EXISTS idx_review_evidence_finding_id ON review_evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_review_evidence_session_id ON review_evidence(session_id);
 CREATE INDEX IF NOT EXISTS idx_git_activity_project_period ON git_activity(project_path, period_start);
+CREATE INDEX IF NOT EXISTS idx_alert_events_period_created ON alert_events(period_type, created_at);
 """
 
 
@@ -319,6 +335,9 @@ COLUMN_MIGRATIONS = {
         "source_line_start": "source_line_start INTEGER",
         "source_line_end": "source_line_end INTEGER",
         "call_target": "call_target TEXT",
+    },
+    "report_snapshots": {
+        "dashboard_model_json": "dashboard_model_json TEXT",
     },
 }
 
@@ -458,7 +477,25 @@ REQUIRED_COLUMNS = {
         "message_hash",
         "created_at",
     },
-    "report_snapshots": {"period_type", "period_start", "report_json", "report_hash", "created_at"},
+    "report_snapshots": {
+        "period_type",
+        "period_start",
+        "report_json",
+        "report_hash",
+        "dashboard_model_json",
+        "created_at",
+    },
+    "alert_events": {
+        "id",
+        "period_type",
+        "period_start",
+        "alert_key",
+        "threshold_value",
+        "actual_value",
+        "report_hash",
+        "config_hash",
+        "created_at",
+    },
     "git_links": {"repo_path", "project_path", "linked_at"},
     "git_activity": {
         "project_path",
@@ -486,10 +523,27 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def init_db(db_path: Path, *, allow_schema_upgrade: bool = False) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
+        _preflight_schema_version(conn, allow_schema_upgrade=allow_schema_upgrade)
         conn.executescript(SCHEMA_SQL)
         _ensure_columns(conn)
         _ensure_indexes(conn)
         _ensure_schema_meta(conn, allow_schema_upgrade=allow_schema_upgrade)
+
+
+def _preflight_schema_version(conn: sqlite3.Connection, *, allow_schema_upgrade: bool) -> None:
+    if not _table_exists(conn, "schema_meta"):
+        return
+    row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+    if row is None:
+        return
+    try:
+        version = int(row["value"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("schema_version is not an integer") from exc
+    if version > CURRENT_SCHEMA_VERSION:
+        raise ValueError(f"database schema_version {version} is newer than supported {CURRENT_SCHEMA_VERSION}")
+    if version < CURRENT_SCHEMA_VERSION and not allow_schema_upgrade:
+        raise ValueError(f"database schema_version {version} is older than supported {CURRENT_SCHEMA_VERSION}; run: aicg rebuild")
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -509,6 +563,7 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
 def _ensure_schema_meta(conn: sqlite3.Connection, *, allow_schema_upgrade: bool = False) -> None:
     now = utc_now_iso()
     _assert_required_columns(conn)
+    upgraded = False
     row = conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
@@ -542,6 +597,7 @@ def _ensure_schema_meta(conn: sqlite3.Connection, *, allow_schema_upgrade: bool 
                 """,
                 (str(CURRENT_SCHEMA_VERSION), now),
             )
+            upgraded = True
     conn.execute(
         """
         INSERT INTO schema_meta (key, value, created_at, updated_at)
@@ -550,6 +606,61 @@ def _ensure_schema_meta(conn: sqlite3.Connection, *, allow_schema_upgrade: bool 
         """,
         (now, now),
     )
+    salt = _ensure_hash_salt(conn, now)
+    set_hash_salt(salt)
+    if upgraded:
+        _rehash_user_state(conn)
+
+
+def _ensure_hash_salt(conn: sqlite3.Connection, now: str) -> str:
+    row = conn.execute("SELECT value FROM schema_meta WHERE key = 'hash_salt'").fetchone()
+    if row is not None and row["value"]:
+        return str(row["value"])
+    salt = secrets.token_hex(32)
+    conn.execute(
+        """
+        INSERT INTO schema_meta (key, value, created_at, updated_at)
+        VALUES ('hash_salt', ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (salt, now, now),
+    )
+    return salt
+
+
+def _rehash_user_state(conn: sqlite3.Connection) -> None:
+    if _table_exists(conn, "report_snapshots"):
+        for row in conn.execute("SELECT period_type, period_start, report_json FROM report_snapshots").fetchall():
+            conn.execute(
+                """
+                UPDATE report_snapshots
+                SET report_hash = ?
+                WHERE period_type = ? AND period_start = ?
+                """,
+                (sha256_text(row["report_json"]), row["period_type"], row["period_start"]),
+            )
+    if _table_exists(conn, "alert_events"):
+        for row in conn.execute("SELECT id, report_hash, config_hash FROM alert_events").fetchall():
+            conn.execute(
+                """
+                UPDATE alert_events
+                SET report_hash = ?, config_hash = ?
+                WHERE id = ?
+                """,
+                (
+                    sha256_text(f"legacy-alert-report:{row['report_hash']}") if row["report_hash"] else None,
+                    sha256_text(f"legacy-alert-config:{row['config_hash']}"),
+                    row["id"],
+                ),
+            )
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 def _assert_required_columns(conn: sqlite3.Connection) -> None:
@@ -1146,19 +1257,44 @@ def upsert_report_snapshot(
     period_start: str,
     report_json: str,
     report_hash: str,
+    dashboard_model_json: str | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO report_snapshots (
-            period_type, period_start, report_json, report_hash, created_at
-        ) VALUES (?, ?, ?, ?, ?)
+            period_type, period_start, report_json, report_hash, dashboard_model_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(period_type, period_start) DO UPDATE SET
             report_json=excluded.report_json,
             report_hash=excluded.report_hash,
+            dashboard_model_json=excluded.dashboard_model_json,
             created_at=excluded.created_at
         """,
-        (period_type, period_start, report_json, report_hash, utc_now_iso()),
+        (period_type, period_start, report_json, report_hash, dashboard_model_json, utc_now_iso()),
     )
+
+
+def insert_alert_events(conn: sqlite3.Connection, events: list[AlertEvent]) -> None:
+    for event in events:
+        conn.execute(
+            """
+            INSERT INTO alert_events (
+                id, period_type, period_start, alert_key, threshold_value,
+                actual_value, report_hash, config_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.id,
+                event.period_type,
+                event.period_start,
+                event.alert_key,
+                event.threshold_value,
+                event.actual_value,
+                event.report_hash,
+                event.config_hash,
+                event.created_at,
+            ),
+        )
 
 
 def upsert_git_link(conn: sqlite3.Connection, *, repo_path: str, project_path: str) -> None:
@@ -1216,6 +1352,7 @@ def count_rows(conn: sqlite3.Connection, table: str) -> int:
         "report_snapshots",
         "git_links",
         "git_activity",
+        "alert_events",
     }
     if table not in allowed:
         raise ValueError(f"Unsupported table: {table}")

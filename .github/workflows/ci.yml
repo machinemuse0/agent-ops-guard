@@ -1,0 +1,82 @@
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build and install wheel
+        run: |
+          python -m pip install build pytest
+          python -m build --wheel
+          python -c "import glob, subprocess, sys; wheels = glob.glob('dist/*.whl'); subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', wheels[0]])"
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Installed wheel smoke
+        run: |
+          python -c "import os, subprocess, sys, tempfile; cwd = tempfile.mkdtemp(); home = os.path.join(cwd, 'aicg-home'); env = dict(os.environ, AICG_HOME=home); subprocess.check_call([sys.executable, '-m', 'aicg', 'init'], cwd=cwd, env=env); subprocess.check_call([sys.executable, '-m', 'aicg', 'doctor', '--self-check', '--json'], cwd=cwd, env=env)"
+      - name: Verify example provider
+        run: python -m aicg providers verify aicg_example_provider --fixtures examples/provider-plugin/fixtures --format json
+        env:
+          PYTHONPATH: examples/provider-plugin
+      - name: Fuzz smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AICG_HOME="$RUNNER_TEMP/aicg-fuzz"
+          python -m aicg init
+          mkdir -p "$AICG_HOME/raw/codex"
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          root = Path(os.environ["AICG_HOME"]) / "raw" / "codex" / "fuzz.jsonl"
+          root.write_text('not-json\n{"type":"message","content":"<script>alert(1)</script>"}\n' + ("x" * 20000) + "\n", encoding="utf-8")
+          PY
+          python -m aicg scan --since all --provider codex
+          python -m aicg summary --since all --format html --redact-paths --out "$AICG_HOME/reports/fuzz.html"
+          python -m aicg doctor --self-check --json
+      - name: Stability snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m aicg --help
+          python -m aicg providers --help
+          python -m aicg export --help
+
+  build:
+    name: build artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

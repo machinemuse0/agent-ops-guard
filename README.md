@@ -8,7 +8,7 @@ AgentOps Guard 是一个 local-first 的 AI coding agent 使用诊断与成本�
 python -m aicg
 ```
 
-当前版本是 `v0.6`。这个阶段的重点不是云端商业化，也不是接管账单系统，而是把本机日志变成可信、可迁移、可复核、不会泄露 raw prompt/code/output 的本地报告、review 诊断和 metadata 数据层。
+当前版本是 `v0.8`。这个阶段的重点不是云端商业化，也不是接管账单系统，而是把本机日志变成可信、可迁移、可复核、不会泄露 raw prompt/code/output 的本地报告、review 诊断、dashboard、provider 插件接口和 metadata 数据层。
 
 ## Why
 
@@ -24,16 +24,22 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 
 ## Current Capabilities
 
-`v0.6` 已实现：
+`v0.8` 已实现：
 
 - `python -m aicg init`
 - `python -m aicg capture codex -- ...`
 - `python -m aicg providers`
+- `python -m aicg providers verify <module_or_package> --fixtures fixtures/`
 - `python -m aicg scan --since 24h --provider all`
 - `python -m aicg rebuild --since all`
 - `python -m aicg import usage --provider openrouter --file usage.json`
 - `python -m aicg summary --since 24h --out daily.md`
+- `python -m aicg summary --since 24h --format html --out daily.html`
+- `python -m aicg summary --since 24h --redact-paths --out daily.md`
 - `python -m aicg summary --period week --compare --out weekly.md`
+- `python -m aicg dashboard --period day --out ~/.aicg/reports/dashboard.html`
+- `python -m aicg alerts check --period day`
+- `python -m aicg schedule print --scheduler cron|launchd|systemd --time 09:00`
 - `python -m aicg review --session <session_id> --format md|json`
 - `python -m aicg review --last`
 - `python -m aicg review --since 24h --top 5`
@@ -51,6 +57,7 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 - `python -m aicg inspect session <session_id> --format md|json`
 - `python -m aicg inspect source <source_file_hash> --format md|json`
 - `python -m aicg export --kind sessions|turns|tool-events|issues|scan-errors --format json|csv --out <path>`
+- `python -m aicg export --kind sessions --format json --redact-paths --out sessions.json`
 
 当前 reader 支持：
 
@@ -147,10 +154,36 @@ python -m aicg summary --since 24h --out ~/.aicg/reports/daily.md
 python -m aicg summary --since 24h --format json --out ~/.aicg/reports/daily.json
 ```
 
+生成单周期 HTML 报告：
+
+```bash
+python -m aicg summary --since 24h --format html --out ~/.aicg/reports/daily.html
+```
+
 生成周期快照并对比上一周期：
 
 ```bash
 python -m aicg summary --period week --compare --out ~/.aicg/reports/weekly.md
+```
+
+生成本地 dashboard：
+
+```bash
+python -m aicg dashboard --period day --out ~/.aicg/reports/dashboard.html
+```
+
+检查本地 alert 阈值：
+
+```bash
+python -m aicg alerts check --period day
+```
+
+打印系统调度器配置文本：
+
+```bash
+python -m aicg schedule print --scheduler cron --time 09:00
+python -m aicg schedule print --scheduler launchd --time 09:00
+python -m aicg schedule print --scheduler systemd --time 09:00
 ```
 
 Review 单个高风险 session：
@@ -171,6 +204,7 @@ python -m aicg review --project /path/to/project --since 7d --format json
 
 ```bash
 python -m aicg providers
+python -m aicg providers verify my_provider_plugin --fixtures fixtures/
 ```
 
 重建派生表：
@@ -223,6 +257,7 @@ python -m aicg inspect source <source_file_hash> --format json
 ```bash
 python -m aicg export --kind issues --format json --since 24h --out ~/.aicg/reports/issues.json
 python -m aicg export --kind sessions --format csv --since 24h --out ~/.aicg/reports/sessions.csv
+python -m aicg export --kind sessions --format json --redact-paths --out ~/.aicg/reports/sessions-redacted.json
 ```
 
 ## Daily Report
@@ -244,6 +279,46 @@ python -m aicg export --kind sessions --format csv --since 24h --out ~/.aicg/rep
 `v0.5` 的日报先生成 `daily_report` JSON model，再从同一个 model 渲染 Markdown。session 计数按 `session_id` 去重；即使一个 session 被拆成多个 `model/task_type` rollup，privacy/policy、failure/retry、background anomalies、waste 和 git activity 也不会被重复放大。
 
 `v0.6` 起，High-risk issues 会追加 `run aicg review --session <id> for diagnosis` 引导。Review 是按需深查，不会读取 raw prompt/code/output；它诊断的是失败形状，例如重复 error hash、上下文膨胀、早期 shell 失败、输出洪泛和 interrupted tail。Review 默认只展示 source hash 和行号；需要在本机解析 source hash 时，显式运行 `python -m aicg inspect source <source_file_hash>`。
+
+`v0.7` 起，`summary --format html` 会从同一个 report model 生成单文件 HTML 报告。HTML 输出不加载网络资源，不引用前端依赖，并对日志派生字符串做 HTML 转义。
+
+## Local Dashboard And Alerts
+
+`python -m aicg dashboard` 生成静态 HTML 文件，不启动 Web server。dashboard 数据来自当前周期 report、`report_snapshots` 历史快照、`review_findings` 聚合和 `alert_events` 历史记录；趋势图使用内联 SVG，禁用 JavaScript 时数字和图表仍然可读。
+
+`[alerts]` 默认不启用。需要本地阈值时，在 `~/.aicg/config.toml` 中显式配置：
+
+```toml
+[alerts]
+daily_cost_usd_max = 5.0
+daily_waste_rate_max = 0.3
+new_policy_violations_max = 0
+interrupted_sessions_max = 3
+```
+
+`python -m aicg alerts check --period day` 命中阈值时返回 exit 3，并把事件追加到 `alert_events`。`summary --period day|week|month` 写入快照后也会评估 alerts。AgentOps Guard 不内置邮件、Slack、webhook 或 daemon；需要通知时，可以让 cron/launchd/systemd 根据 exit code 处理。
+
+`python -m aicg schedule print` 只向 stdout 打印 cron/launchd/systemd 配置文本，不写 `crontab`、`~/Library/LaunchAgents` 或 systemd 目录。生成的命令使用当前 Python 解释器运行 `-m aicg`，并在当前环境存在 `AICG_HOME` 时保留该值。
+
+## v0.8 Stability And Plugins
+
+`v0.8` 引入 schema v8：`schema_meta.hash_salt` 在 `init` 时生成，所有日志/报表派生 hash 使用本机 salt 做 HMAC-SHA256。同一份日志在两台机器上不会产生可关联 hash；同一机器 rebuild 后 hash 稳定。旧 DB 需要 `python -m aicg rebuild --since all`。
+
+Provider 插件通过 `aicg.providers` entry point 暴露 `ProviderReader`。第三方插件默认必须先通过：
+
+```bash
+python -m aicg providers verify <module_or_package> --fixtures <fixtures_dir>
+```
+
+通过后会写入本地 `provider-verifications.json`，记录 provider、entry point、distribution version、module file hash 和 fixture hashes；之后 `scan`、`providers`、`doctor` 会把匹配记录的插件标为 `verified=true`。插件代码或安装版本变化后需要重新 verify。`--allow-unverified` 只用于显式本地实验；默认 `doctor` 不会 import 未验证 provider。
+
+稳定性、插件、迁移与安全边界见：
+
+- `docs/stability.md`
+- `docs/provider-plugin-guide.md`
+- `docs/migration-guide.md`
+- `docs/threat-model.md`
+- `schemas/*.schema.json`
 
 ## Local Pricing
 
@@ -295,7 +370,7 @@ Provider token 语义按来源处理，避免重复计算：
 
 `doctor --deep` 会递归扫描大目录，但仍受 `--max-files` 限制。报告会输出 `mode.offline`、`mode.deep`、`limits.maxFiles` 和 `scanCapReached`，方便解释诊断覆盖范围。
 
-`doctor --self-check` 会验证 DB schema version、required tables/columns/indexes、config parse、price table numeric fields、report JSON consistency、overview counts，以及 `scan_errors` 是否只保存 hash。
+`doctor --self-check` 会验证 DB schema version、required tables/columns/indexes、config parse、price table numeric fields、report JSON consistency、overview counts，以及 `scan_errors`、`review_evidence` 是否只保存 hash/指针。
 
 Doctor 永远不自动删除缓存、不修改 Codex/Claude 配置、不重建 state DB。
 
@@ -308,10 +383,13 @@ aicg/
   cli.py
   config.py
   db.py
+  alerts.py
+  dashboard.py
   doctor.py
   analyzer.py
   pricing.py
   reporter.py
+  schedule.py
   self_check.py
   readers/
     codex_jsonl.py
@@ -461,7 +539,7 @@ local JSONL logs
 
 目标版本：`v0.7`
 
-计划：
+状态：已实现。
 
 - 增加 local-only static HTML dashboard。
 - 增加 trend charts。

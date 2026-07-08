@@ -131,6 +131,19 @@ class ReviewEvidence:
 
 
 @dataclass
+class AlertEvent:
+    id: str
+    period_type: str
+    period_start: str
+    alert_key: str
+    threshold_value: float
+    actual_value: float | None
+    report_hash: str | None
+    config_hash: str
+    created_at: str = ""
+
+
+@dataclass
 class Issue:
     id: str
     session_id: str | None

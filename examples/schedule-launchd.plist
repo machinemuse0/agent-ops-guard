@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.aicg.daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>/usr/bin/env python -m aicg scan --since 24h --provider all &amp;&amp; /usr/bin/env python -m aicg summary --period day --compare --format md --out ~/.aicg/reports/daily.md &amp;&amp; /usr/bin/env python -m aicg dashboard --period day --out ~/.aicg/reports/dashboard.html</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+</dict>
+</plist>

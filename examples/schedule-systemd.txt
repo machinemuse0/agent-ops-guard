@@ -1,0 +1,18 @@
+# ~/.config/systemd/user/aicg-daily.service
+[Unit]
+Description=AgentOps Guard daily local scan
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -lc '/usr/bin/env python -m aicg scan --since 24h --provider all && /usr/bin/env python -m aicg summary --period day --compare --format md --out ~/.aicg/reports/daily.md && /usr/bin/env python -m aicg dashboard --period day --out ~/.aicg/reports/dashboard.html'
+
+# ~/.config/systemd/user/aicg-daily.timer
+[Unit]
+Description=Run AgentOps Guard daily
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

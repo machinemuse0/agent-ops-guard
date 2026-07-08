@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from aicg.cli import _read_provider_file
@@ -56,3 +57,28 @@ def test_successful_rescan_clears_prior_scan_error(tmp_path):
         conn.commit()
 
         assert count_rows(conn, "scan_errors") == 0
+
+
+def test_malformed_url_text_does_not_fail_entire_reader_file(tmp_path):
+    path = tmp_path / "broken-url.jsonl"
+    events = [
+        {"type": "session_meta", "timestamp": "2026-07-05T00:00:00Z", "payload": {"id": "broken-url-thread"}},
+        {"type": "turn_context", "timestamp": "2026-07-05T00:00:01Z", "payload": {"turn_id": "turn"}},
+        {
+            "type": "response_item",
+            "timestamp": "2026-07-05T00:00:02Z",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call",
+                "name": "exec_command",
+                "arguments": "see https://[fe80::1 broken",
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    records = CodexJsonlReader().read(path)
+
+    assert records.sessions
+    assert records.turns
+    assert records.malformed_line_count == 0

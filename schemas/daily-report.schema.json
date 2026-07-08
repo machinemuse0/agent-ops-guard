@@ -1,0 +1,24 @@
+{
+  "title": "AgentOps Guard Daily Report",
+  "schemaVersion": 1,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "since",
+    "overview",
+    "projectRanking",
+    "providerModelBreakdown",
+    "taskRollups",
+    "failureRetry",
+    "backgroundAnomalies",
+    "toolUsage",
+    "privacyPolicyFindings",
+    "policyLifecycle",
+    "wasteBreakdown",
+    "efficiency",
+    "gitActivity",
+    "highRiskIssues",
+    "recommendedFixes",
+    "consistencyChecks"
+  ]
+}

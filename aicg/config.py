@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
         "no_progress_edit_success_max": 0.3,
         "model_fallback_failure_multiplier": 2.0,
     },
+    "alerts": {},
 }
 
 
@@ -84,6 +85,12 @@ early_shell_failure_score = 2.0
 no_progress_min_turns = 20
 no_progress_edit_success_max = 0.3
 model_fallback_failure_multiplier = 2.0
+
+# [alerts]
+# daily_cost_usd_max = 5.0
+# daily_waste_rate_max = 0.3
+# new_policy_violations_max = 0
+# interrupted_sessions_max = 3
 """
 
 
@@ -152,6 +159,7 @@ def load_config(app_dir: Path | None = None) -> dict:
         "thresholds": dict(DEFAULT_CONFIG["thresholds"]),
         "prices": dict(DEFAULT_CONFIG["prices"]),
         "review": dict(DEFAULT_CONFIG["review"]),
+        "alerts": dict(DEFAULT_CONFIG["alerts"]),
     }
     if paths["config"].exists():
         with paths["config"].open("rb") as handle:

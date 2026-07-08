@@ -4,13 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aicg"
-version = "0.6.0"
+version = "0.8.0"
 description = "Local AgentOps Guard CLI for AI coding diagnostics, evidence, and cost reports"
 requires-python = ">=3.11"
 readme = "README.md"
 
 [project.scripts]
 aicg = "aicg.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["aicg*"]
+
+[tool.setuptools.data-files]
+"schemas" = [
+  "schemas/daily-report.schema.json",
+  "schemas/dashboard-model.schema.json",
+  "schemas/review-output.schema.json",
+  "schemas/export-output.schema.json",
+  "schemas/provider-capability.schema.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

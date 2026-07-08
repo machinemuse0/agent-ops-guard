@@ -1,0 +1,1 @@
+0 9 * * * cd "$HOME" && /usr/bin/env python -m aicg scan --since 24h --provider all && /usr/bin/env python -m aicg summary --period day --format md && /usr/bin/env python -m aicg dashboard --period day

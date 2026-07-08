@@ -10,7 +10,7 @@ from typing import Any
 
 from .config import app_paths
 from .models import PolicyFinding
-from .util import sha256_text, stable_id, utc_now_iso
+from .util import raw_sha256_text, sha256_text, stable_id, utc_now_iso
 
 
 LEVEL_ORDER = {"needs_review": 1, "warning": 2, "violation": 3}
@@ -154,10 +154,11 @@ def sensitive_policy_findings(
             for match in pattern.finditer(text):
                 matched = match.group(0)
                 detail_hash = sha256_text(matched)
+                legacy_detail_hash = raw_sha256_text(matched)
                 rule_id = f"{prefix}.{name}"
                 findings.append(
                     PolicyFinding(
-                        id=stable_id("policy", rule_id, session_id, tool_event_id or "", surface, detail_hash),
+                        id=stable_id("policy", rule_id, session_id, tool_event_id or "", surface, legacy_detail_hash),
                         session_id=session_id,
                         tool_event_id=tool_event_id,
                         rule_id=rule_id,
@@ -256,8 +257,9 @@ def _service_finding(row: sqlite3.Row, policy: EffectivePolicy, target: str, now
             return None
         rule_id = f"services.denylist:{target}"
     detail_hash = sha256_text(target)
+    legacy_detail_hash = raw_sha256_text(target)
     return PolicyFinding(
-        id=stable_id("policy", rule_id, row["session_id"], detail_hash),
+        id=stable_id("policy", rule_id, row["session_id"], legacy_detail_hash),
         session_id=row["session_id"],
         tool_event_id=row["id"],
         rule_id=rule_id,

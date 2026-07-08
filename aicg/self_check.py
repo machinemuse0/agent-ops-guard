@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 import tomllib
+import json
+import sys
 from pathlib import Path
 from typing import Any
 
 from .config import app_paths
 from .db import CURRENT_SCHEMA_VERSION, REQUIRED_COLUMNS as DB_REQUIRED_COLUMNS
+from .dashboard import build_dashboard_model
 from .reporter import build_daily_report
 from .util import utc_now_iso
 
@@ -28,6 +31,7 @@ REQUIRED_TABLES = {
     "report_snapshots",
     "git_links",
     "git_activity",
+    "alert_events",
 }
 
 
@@ -47,6 +51,7 @@ REQUIRED_INDEXES = {
     "idx_review_findings_session_id",
     "idx_review_evidence_finding_id",
     "idx_git_activity_project_period",
+    "idx_alert_events_period_created",
 }
 
 
@@ -140,6 +145,7 @@ def _check_db(path: Path) -> list[dict[str, Any]]:
                 )
             )
         checks.append(_check_schema_version(conn, tables))
+        checks.append(_check_hash_salt(conn, tables))
         indexes = _sqlite_names(conn, "index")
         missing_indexes = sorted(REQUIRED_INDEXES - indexes)
         checks.append(
@@ -180,6 +186,7 @@ def _check_db(path: Path) -> list[dict[str, Any]]:
                 )
             )
         checks.append(_check_report_consistency(conn, tables))
+        checks.extend(_check_schema_files(conn))
     return checks
 
 
@@ -199,6 +206,18 @@ def _check_schema_version(conn: sqlite3.Connection, tables: set[str]) -> dict[st
         f"schema_version={version}",
         expected=CURRENT_SCHEMA_VERSION,
         actual=version,
+    )
+
+
+def _check_hash_salt(conn: sqlite3.Connection, tables: set[str]) -> dict[str, Any]:
+    if "schema_meta" not in tables:
+        return _check("db.hash_salt", "fail", "schema_meta missing")
+    row = conn.execute("SELECT value FROM schema_meta WHERE key = 'hash_salt'").fetchone()
+    valid = bool(row and isinstance(row["value"], str) and len(row["value"]) >= 32)
+    return _check(
+        "db.hash_salt",
+        "pass" if valid else "fail",
+        "hash_salt present" if valid else "hash_salt missing or invalid",
     )
 
 
@@ -240,6 +259,76 @@ def _check_report_consistency(conn: sqlite3.Connection, tables: set[str]) -> dic
         expectedSessions=expected_sessions,
         actualSessions=actual_sessions,
         missingKeys=missing_keys,
+    )
+
+
+def _check_schema_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    root = _schema_root()
+    expected = {
+        "daily-report.schema.json",
+        "dashboard-model.schema.json",
+        "review-output.schema.json",
+        "export-output.schema.json",
+        "provider-capability.schema.json",
+    }
+    checks: list[dict[str, Any]] = []
+    if not root.exists():
+        return [_check("schemas.exists", "fail", "schemas directory missing", path=str(root))]
+    present = {path.name for path in root.glob("*.schema.json")}
+    missing = sorted(expected - present)
+    checks.append(
+        _check(
+            "schemas.required_files",
+            "fail" if missing else "pass",
+            "schema files present" if not missing else "schema files missing",
+            missing=missing,
+        )
+    )
+    loaded: dict[str, dict[str, Any]] = {}
+    for name in sorted(expected & present):
+        path = root / name
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            checks.append(_check(f"schemas.parse.{name}", "fail", "schema parse failed", errorType=type(exc).__name__))
+            continue
+        loaded[name] = data
+        checks.append(
+            _check(
+                f"schemas.parse.{name}",
+                "pass" if isinstance(data.get("required"), list) else "fail",
+                "schema has required list",
+            )
+        )
+    if "daily-report.schema.json" in loaded:
+        report = build_daily_report(conn, since="9999d")
+        checks.append(_check_required_keys("schemas.daily_report.required", report, loaded["daily-report.schema.json"]))
+    if "dashboard-model.schema.json" in loaded:
+        dashboard = build_dashboard_model(conn, current_report=build_daily_report(conn, since="9999d"))
+        checks.append(_check_required_keys("schemas.dashboard.required", dashboard, loaded["dashboard-model.schema.json"]))
+    return checks
+
+
+def _schema_root() -> Path:
+    candidates = [
+        Path(__file__).resolve().parents[1] / "schemas",
+        Path(sys.prefix) / "schemas",
+        Path(sys.base_prefix) / "schemas",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _check_required_keys(check_id: str, model: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    required = {str(item) for item in schema.get("required", [])}
+    missing = sorted(required - set(model))
+    return _check(
+        check_id,
+        "fail" if missing else "pass",
+        "required keys present" if not missing else "required keys missing",
+        missing=missing,
     )
 
 

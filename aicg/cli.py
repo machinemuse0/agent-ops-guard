@@ -1,25 +1,42 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import csv
 import datetime as dt
+import hashlib
 import json
 import os
 import shlex
 import sqlite3
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 from . import __version__
+from .alerts import alert_events_from_model, evaluate_alerts, render_alerts_text
 from .analyzer import analyze_sessions
 from .config import app_paths, ensure_app_dirs, load_config
+from .conformance import (
+    load_reader_from_module,
+    render_conformance_json,
+    render_conformance_markdown,
+    verify_reader,
+)
+from .dashboard import (
+    build_dashboard_model,
+    render_dashboard_html,
+    render_dashboard_json,
+    render_summary_html,
+)
 from .db import (
     ack_policy_finding,
     backup_database,
     clear_scan_error,
     connect,
     import_records,
+    insert_alert_events,
     init_db,
     insert_run,
     replace_issues_for_sessions,
@@ -33,7 +50,7 @@ from .db import (
     upsert_scan_error,
     upsert_scan_state,
 )
-from .doctor import run_doctor
+from .doctor import collect_doctor_report, format_doctor_markdown
 from .models import NormalizedSession, NormalizedTurn, ParsedRecords
 from .policy import (
     evaluate_policy_findings,
@@ -45,6 +62,7 @@ from .policy import (
 )
 from .pricing import apply_pricing
 from .readers import default_registry
+from .readers.registry import entry_points_for_module, module_file_hash, module_tree_hash
 from .reporter import build_daily_report, render_markdown_report
 from .review import (
     CONFIDENCE_ORDER,
@@ -57,6 +75,7 @@ from .review import (
     render_review_json,
     render_review_markdown,
 )
+from .schedule import render_schedule_text
 from .util import (
     detect_privacy_flags,
     escape_markdown_text,
@@ -66,6 +85,7 @@ from .util import (
     markdown_code,
     parse_since,
     redact_secrets,
+    redact_home_paths,
     sha256_text,
     stable_id,
     utc_now_iso,
@@ -106,7 +126,14 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init", help="Create local app dirs and DB")
     init_parser.set_defaults(func=cmd_init)
 
-    providers_parser = subparsers.add_parser("providers", help="List provider readers and capabilities")
+    providers_parser = subparsers.add_parser("providers", help="List or verify provider readers")
+    providers_parser.add_argument("--allow-unverified", action="store_true", help="List/load unverified third-party providers")
+    providers_subparsers = providers_parser.add_subparsers(dest="providers_command")
+    providers_verify = providers_subparsers.add_parser("verify", help="Verify a provider plugin module")
+    providers_verify.add_argument("module_or_package")
+    providers_verify.add_argument("--fixtures")
+    providers_verify.add_argument("--format", choices=["md", "json"], default="md")
+    providers_verify.set_defaults(func=cmd_providers_verify)
     providers_parser.set_defaults(func=cmd_providers)
 
     capture_parser = subparsers.add_parser("capture", help="Capture an agent command")
@@ -118,12 +145,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     scan_parser = subparsers.add_parser("scan", help="Scan captured JSONL files")
     scan_parser.add_argument("--since", default="24h")
-    scan_parser.add_argument("--provider", choices=["codex", "claude", "all"], default="all")
+    scan_parser.add_argument("--provider", default="all")
+    scan_parser.add_argument("--allow-unverified", action="store_true", help="Load unverified third-party providers")
     scan_parser.set_defaults(func=cmd_scan)
 
     rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild derived tables from local source logs")
     rebuild_parser.add_argument("--since", default="all")
-    rebuild_parser.add_argument("--provider", choices=["codex", "claude", "all"], default="all")
+    rebuild_parser.add_argument("--provider", default="all")
+    rebuild_parser.add_argument("--allow-unverified", action="store_true", help="Load unverified third-party providers")
     rebuild_parser.set_defaults(func=cmd_rebuild)
 
     import_parser = subparsers.add_parser("import", help="Import external local usage exports")
@@ -133,14 +162,37 @@ def build_parser() -> argparse.ArgumentParser:
     usage_parser.add_argument("--file", required=True)
     usage_parser.set_defaults(func=cmd_import_usage)
 
-    summary_parser = subparsers.add_parser("summary", help="Write a Markdown summary")
+    summary_parser = subparsers.add_parser("summary", help="Write a local summary")
     summary_parser.add_argument("--since", default="24h")
     summary_parser.add_argument("--period", choices=["day", "week", "month"])
     summary_parser.add_argument("--compare", action="store_true")
     summary_parser.add_argument("--utc", action="store_true")
-    summary_parser.add_argument("--format", choices=["md", "json"], default="md")
-    summary_parser.add_argument("--out", default="~/.aicg/reports/daily.md")
+    summary_parser.add_argument("--format", choices=["md", "json", "html"], default="md")
+    summary_parser.add_argument("--out")
+    summary_parser.add_argument("--redact-paths", action="store_true")
     summary_parser.set_defaults(func=cmd_summary)
+
+    dashboard_parser = subparsers.add_parser("dashboard", help="Write a static local dashboard")
+    dashboard_parser.add_argument("--period", choices=["day", "week", "month"], default="day")
+    dashboard_parser.add_argument("--limit", type=int, default=90)
+    dashboard_parser.add_argument("--format", choices=["html", "json"], default="html")
+    dashboard_parser.add_argument("--out")
+    dashboard_parser.add_argument("--redact-paths", action="store_true")
+    dashboard_parser.set_defaults(func=cmd_dashboard)
+
+    alerts_parser = subparsers.add_parser("alerts", help="Evaluate local alert thresholds")
+    alerts_subparsers = alerts_parser.add_subparsers(dest="alerts_command", required=True)
+    alerts_check = alerts_subparsers.add_parser("check", help="Check local alert thresholds")
+    alerts_check.add_argument("--period", choices=["day", "week", "month"], default="day")
+    alerts_check.set_defaults(func=cmd_alerts_check)
+
+    schedule_parser = subparsers.add_parser("schedule", help="Print local scheduler configuration")
+    schedule_subparsers = schedule_parser.add_subparsers(dest="schedule_command", required=True)
+    schedule_print = schedule_subparsers.add_parser("print", help="Print cron/launchd/systemd text")
+    schedule_print.add_argument("--scheduler", required=True, choices=["cron", "launchd", "systemd"])
+    schedule_print.add_argument("--time", default="09:00")
+    schedule_print.add_argument("--commands", default="scan,summary,dashboard")
+    schedule_print.set_defaults(func=cmd_schedule_print)
 
     inspect_parser = subparsers.add_parser("inspect", help="Inspect normalized local data")
     inspect_subparsers = inspect_parser.add_subparsers(dest="inspect_kind", required=True)
@@ -162,6 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--format", required=True, choices=["json", "csv"])
     export_parser.add_argument("--since", default="24h")
     export_parser.add_argument("--out", required=True)
+    export_parser.add_argument("--redact-paths", action="store_true")
     export_parser.set_defaults(func=cmd_export)
 
     policy_parser = subparsers.add_parser("policy", help="Check local policy findings")
@@ -231,9 +284,27 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_providers(args: argparse.Namespace) -> int:
-    rows = default_registry().rows()
-    print(json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True))
+    paths = app_paths()
+    registry = default_registry(
+        allow_unverified=bool(getattr(args, "allow_unverified", False)),
+        verified_plugins=_load_provider_verifications(paths),
+    )
+    _print_provider_load_warnings(registry.load_errors())
+    print(json.dumps(registry.rows(), ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def cmd_providers_verify(args: argparse.Namespace) -> int:
+    paths = app_paths()
+    ensure_app_dirs()
+    reader = load_reader_from_module(args.module_or_package)
+    fixtures = Path(args.fixtures).expanduser() if args.fixtures else None
+    model = verify_reader(reader, fixtures=fixtures)
+    if model["passed"]:
+        _store_provider_verification(paths, args.module_or_package, model, fixtures)
+    output = render_conformance_json(model) if args.format == "json" else render_conformance_markdown(model)
+    print(output)
+    return 0 if model["passed"] else 3
 
 
 def cmd_capture(args: argparse.Namespace) -> int:
@@ -287,6 +358,9 @@ def cmd_capture(args: argparse.Namespace) -> int:
         print(f"warning: failed to start command: {exc}", file=sys.stderr)
     else:
         assert process.stdout is not None
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        pending_stdout = ""
+        capture_policy = load_policy() if raw_handle is not None else None
         while True:
             chunk = process.stdout.read(8192)
             if not chunk:
@@ -294,14 +368,11 @@ def cmd_capture(args: argparse.Namespace) -> int:
             sys.stdout.buffer.write(chunk)
             sys.stdout.buffer.flush()
             if raw_handle is not None:
-                text = chunk.decode("utf-8", errors="replace")
-                raw_handle.write(
-                    json.dumps(
-                        {"stdout": redact_with_policy(redact_secrets(text), load_policy())},
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
+                pending_stdout += decoder.decode(chunk)
+                pending_stdout = _flush_redacted_stdout_lines(raw_handle, pending_stdout, capture_policy)
+        if raw_handle is not None:
+            pending_stdout += decoder.decode(b"", final=True)
+            _write_redacted_stdout(raw_handle, pending_stdout, capture_policy)
         exit_code = process.wait()
         if raw_handle is not None:
             raw_handle.write(json.dumps({"ended_at": utc_now_iso(), "exit_code": exit_code}, sort_keys=True) + "\n")
@@ -310,7 +381,7 @@ def cmd_capture(args: argparse.Namespace) -> int:
 
     ended_at = utc_now_iso()
     sanitized_command = _sanitize_command(command)
-    run_id = stable_id("run", started_at, sanitized_command)
+    run_id = stable_id("run", started_at, sanitized_command, uuid.uuid4().hex)
     with connect(paths["db"]) as conn:
         insert_run(
             conn,
@@ -328,6 +399,25 @@ def cmd_capture(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _flush_redacted_stdout_lines(raw_handle, pending_text: str, policy) -> str:
+    while "\n" in pending_text:
+        line, pending_text = pending_text.split("\n", 1)
+        _write_redacted_stdout(raw_handle, line + "\n", policy)
+    return pending_text
+
+
+def _write_redacted_stdout(raw_handle, text: str, policy) -> None:
+    if not text:
+        return
+    raw_handle.write(
+        json.dumps(
+            {"stdout": redact_with_policy(redact_secrets(text), policy)},
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     paths = app_paths()
     ensure_app_dirs()
@@ -335,7 +425,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
     cutoff = _parse_scan_since(args.since)
     config = load_config()
     policy = load_policy()
-    registry = default_registry(policy=policy)
+    registry = default_registry(
+        policy=policy,
+        allow_unverified=bool(getattr(args, "allow_unverified", False)),
+        verified_plugins=_load_provider_verifications(paths),
+    )
+    provider_load_errors = registry.load_errors()
     files_scanned = 0
     files_skipped = 0
     files_failed = 0
@@ -379,6 +474,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print(f"turns inserted/updated: {totals['turns']}")
     print(f"tool events inserted/updated: {totals['tool_events']}")
     print(f"malformed lines: {malformed_lines}")
+    _print_provider_load_warnings(provider_load_errors)
     return 0
 
 
@@ -391,7 +487,11 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
     with connect(paths["db"]) as conn:
         reset_derived_tables(conn)
         conn.commit()
-    scan_args = argparse.Namespace(since=args.since, provider=args.provider)
+    scan_args = argparse.Namespace(
+        since=args.since,
+        provider=args.provider,
+        allow_unverified=getattr(args, "allow_unverified", False),
+    )
     result = cmd_scan(scan_args)
     if backup_path:
         print(f"backup written: {backup_path}")
@@ -422,17 +522,17 @@ def cmd_summary(args: argparse.Namespace) -> int:
     paths = app_paths()
     ensure_app_dirs()
     init_db(paths["db"])
-    out_path = Path(args.out).expanduser()
-    if not out_path.is_absolute():
-        out_path = paths["reports"] / out_path
+    out_path = _output_path(paths, args.out or _summary_default_name(args.format))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     period_meta = _period_meta(args.period, utc=args.utc) if args.period else None
+    config = load_config()
+    alert_model = None
     with connect(paths["db"]) as conn:
         previous_snapshot = _compare_snapshot(conn, period_meta) if args.compare and period_meta else None
         report_model = build_daily_report(
             conn,
             since=period_meta["since"] if period_meta else args.since,
-            config=load_config(),
+            config=config,
             period=period_meta["type"] if period_meta else None,
             period_start=period_meta["start"] if period_meta else None,
             period_end=period_meta["end"] if period_meta else None,
@@ -442,20 +542,115 @@ def cmd_summary(args: argparse.Namespace) -> int:
             report_model["compare"] = _compare_delta(report_model, previous_snapshot)
         if period_meta:
             snapshot_json = json.dumps(report_model, ensure_ascii=False, sort_keys=True)
+            dashboard_model = build_dashboard_model(
+                conn,
+                period=period_meta["type"],
+                limit=90,
+                current_report=report_model,
+            )
+            dashboard_model_json = json.dumps(dashboard_model, ensure_ascii=False, sort_keys=True)
             upsert_report_snapshot(
                 conn,
                 period_type=period_meta["type"],
                 period_start=period_meta["start"],
                 report_json=snapshot_json,
                 report_hash=sha256_text(snapshot_json),
+                dashboard_model_json=dashboard_model_json,
             )
+            alert_model = evaluate_alerts(
+                report_model,
+                config,
+                period_type=period_meta["type"],
+                period_start=period_meta["start"],
+                report_hash=sha256_text(snapshot_json),
+            )
+            insert_alert_events(conn, alert_events_from_model(alert_model))
             conn.commit()
+    output_model = redact_home_paths(report_model) if args.redact_paths else report_model
     if args.format == "json":
-        report = json.dumps(report_model, ensure_ascii=False, indent=2, sort_keys=True)
+        report = json.dumps(output_model, ensure_ascii=False, indent=2, sort_keys=True)
+    elif args.format == "html":
+        report = render_summary_html(output_model)
     else:
-        report = render_markdown_report(report_model)
+        report = render_markdown_report(output_model)
     out_path.write_text(report + ("" if report.endswith("\n") else "\n"), encoding="utf-8")
     print(f"report written: {out_path}")
+    if alert_model is not None:
+        print(render_alerts_text(alert_model))
+    return 0
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    if args.limit <= 0:
+        print("error: --limit must be positive", file=sys.stderr)
+        return 2
+    paths = app_paths()
+    ensure_app_dirs()
+    init_db(paths["db"])
+    out_path = _output_path(paths, args.out or _dashboard_default_name(args.format))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    period_meta = _period_meta(args.period, utc=False)
+    with connect(paths["db"]) as conn:
+        current_report = build_daily_report(
+            conn,
+            since=period_meta["since"],
+            config=load_config(),
+            period=period_meta["type"],
+            period_start=period_meta["start"],
+            period_end=period_meta["end"],
+        )
+        model = build_dashboard_model(
+            conn,
+            period=args.period,
+            limit=args.limit,
+            current_report=current_report,
+        )
+    if args.redact_paths:
+        model = redact_home_paths(model)
+    output = render_dashboard_json(model) if args.format == "json" else render_dashboard_html(model)
+    out_path.write_text(output + ("" if output.endswith("\n") else "\n"), encoding="utf-8")
+    print(f"dashboard written: {out_path}")
+    return 0
+
+
+def cmd_alerts_check(args: argparse.Namespace) -> int:
+    paths = app_paths()
+    ensure_app_dirs()
+    init_db(paths["db"])
+    config = load_config()
+    period_meta = _period_meta(args.period, utc=False)
+    with connect(paths["db"]) as conn:
+        report_model = build_daily_report(
+            conn,
+            since=period_meta["since"],
+            config=config,
+            period=period_meta["type"],
+            period_start=period_meta["start"],
+            period_end=period_meta["end"],
+        )
+        report_json = json.dumps(report_model, ensure_ascii=False, sort_keys=True)
+        alert_model = evaluate_alerts(
+            report_model,
+            config,
+            period_type=period_meta["type"],
+            period_start=period_meta["start"],
+            report_hash=sha256_text(report_json),
+        )
+        insert_alert_events(conn, alert_events_from_model(alert_model))
+        conn.commit()
+    print(render_alerts_text(alert_model))
+    return 3 if alert_model.get("findings") else 0
+
+
+def cmd_schedule_print(args: argparse.Namespace) -> int:
+    print(
+        render_schedule_text(
+            scheduler=args.scheduler,
+            time_value=args.time,
+            commands_value=args.commands,
+        ),
+        end="",
+    )
     return 0
 
 
@@ -499,6 +694,8 @@ def cmd_export(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(paths["db"]) as conn:
         rows = _export_rows(conn, args.kind, cutoff_iso)
+    if args.redact_paths:
+        rows = redact_home_paths(rows)
     if args.format == "json":
         out_path.write_text(
             json.dumps(
@@ -517,7 +714,9 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_policy_rules(args: argparse.Namespace) -> int:
+    paths = app_paths()
     ensure_app_dirs()
+    init_db(paths["db"])
     model = policy_rules_model(load_policy())
     if args.format == "json":
         print(json.dumps(model, ensure_ascii=False, indent=2, sort_keys=True))
@@ -822,6 +1021,104 @@ def _review_output_path(paths: dict[str, Path], value: str) -> Path:
     return out_path
 
 
+def _output_path(paths: dict[str, Path], value: str) -> Path:
+    out_path = Path(value).expanduser()
+    if not out_path.is_absolute():
+        out_path = paths["reports"] / out_path
+    return out_path
+
+
+def _summary_default_name(format_name: str) -> str:
+    return f"daily.{format_name}"
+
+
+def _dashboard_default_name(format_name: str) -> str:
+    return f"dashboard.{format_name}"
+
+
+def _provider_verification_path(paths: dict[str, Path]) -> Path:
+    return paths["app"] / "provider-verifications.json"
+
+
+def _load_provider_verifications(paths: dict[str, Path]) -> dict[str, object]:
+    path = _provider_verification_path(paths)
+    if not path.exists():
+        return {"formatVersion": 2, "records": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"formatVersion": 2, "records": []}
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        return {"formatVersion": 1, "verified": [str(item) for item in data if item]}
+    return {"formatVersion": 2, "records": []}
+
+
+def _print_provider_load_warnings(errors: list[dict[str, str]]) -> None:
+    for error in errors:
+        entry_point = error.get("entryPoint") or error.get("module") or "unknown"
+        error_type = error.get("errorType") or "Error"
+        message = error.get("message") or "provider failed to load"
+        print(f"warning: provider plugin failed to load: {entry_point} ({error_type}: {message})", file=sys.stderr)
+
+
+def _store_provider_verification(
+    paths: dict[str, Path],
+    module_or_package: str,
+    model: dict[str, object],
+    fixtures: Path | None,
+) -> None:
+    path = _provider_verification_path(paths)
+    existing = _load_provider_verifications(paths)
+    records = [item for item in existing.get("records", []) if isinstance(item, dict)]
+    records = [
+        item
+        for item in records
+        if item.get("module") != module_or_package and item.get("provider") != model.get("provider")
+    ]
+    module_hash = module_file_hash(module_or_package)
+    module_package_hash = module_tree_hash(module_or_package)
+    entry_points = entry_points_for_module(module_or_package)
+    if not entry_points:
+        entry_points = [{"entryPoint": None, "distribution": None, "version": None}]
+    fixture_hashes = _fixture_hashes(fixtures)
+    for entry_point in entry_points:
+        records.append(
+            {
+                "module": module_or_package,
+                "provider": model.get("provider"),
+                "entryPoint": entry_point.get("entryPoint"),
+                "distribution": entry_point.get("distribution"),
+                "version": entry_point.get("version"),
+                "moduleFileHash": module_hash,
+                "moduleTreeHash": module_package_hash,
+                "fixtureHashes": fixture_hashes,
+                "verifiedAt": utc_now_iso(),
+            }
+        )
+    path.write_text(
+        json.dumps({"formatVersion": 2, "records": records}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _fixture_hashes(fixtures: Path | None) -> list[dict[str, str]]:
+    if fixtures is None or not fixtures.exists():
+        return []
+    rows = []
+    for path in sorted(fixtures.glob("*.jsonl")):
+        if not path.is_file():
+            continue
+        digest_obj = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest_obj.update(chunk)
+        digest = digest_obj.hexdigest()
+        rows.append({"path": path.name, "sha256": digest})
+    return rows
+
+
 def _known_scan_sources(conn) -> set[str]:
     return {
         row["source_file"]
@@ -1099,13 +1396,13 @@ def _int(value) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    output = run_doctor(
-        json_output=args.json,
+    report = collect_doctor_report(
         online=args.online,
         deep=args.deep,
         max_files=args.max_files,
         self_check=args.self_check,
     )
+    output = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) if args.json else format_doctor_markdown(report)
     if args.out:
         paths = app_paths()
         out_path = Path(args.out).expanduser()
@@ -1116,6 +1413,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"doctor report written: {out_path}")
     else:
         print(output)
+    if args.self_check and report.get("selfCheck", {}).get("status") == "fail":
+        return 3
     return 0
 
 
@@ -1469,5 +1768,5 @@ def _sanitize_policy_ack_reason(reason: str | None) -> str | None:
         for char in normalized
     )
     if redacted != normalized or detect_privacy_flags(normalized) or len(normalized) > 120 or not safe_ascii:
-        return f"sha256:{sha256_text(normalized)}"
+        return f"hmac-sha256:{sha256_text(normalized)}"
     return normalized

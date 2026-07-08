@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import hmac
 import html
 import re
 import shlex
@@ -11,6 +12,7 @@ from urllib.parse import urlparse
 
 
 UTC = dt.timezone.utc
+_HASH_SALT: bytes | None = None
 
 
 def now_utc() -> dt.datetime:
@@ -79,11 +81,40 @@ def parse_since(value: str | None, now: dt.datetime | None = None) -> dt.datetim
     raise ValueError(f"Unsupported --since value: {value!r}")
 
 
+def set_hash_salt(value: str | bytes | None) -> None:
+    global _HASH_SALT
+    if value is None:
+        _HASH_SALT = None
+    elif isinstance(value, bytes):
+        _HASH_SALT = value
+    else:
+        _HASH_SALT = bytes.fromhex(value) if re.fullmatch(r"[0-9a-fA-F]{64}", value) else value.encode("utf-8")
+
+
+def hash_salt_is_set() -> bool:
+    return _HASH_SALT is not None
+
+
 def sha256_text(text: str) -> str:
+    data = text.encode("utf-8", errors="replace")
+    if _HASH_SALT is not None:
+        return hmac.new(_HASH_SALT, data, hashlib.sha256).hexdigest()
+    return hashlib.sha256(data).hexdigest()
+
+
+def raw_sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
 def hash_file(path: Path) -> str:
+    digest = hmac.new(_HASH_SALT, digestmod=hashlib.sha256) if _HASH_SALT is not None else hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def raw_hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -93,7 +124,7 @@ def hash_file(path: Path) -> str:
 
 def stable_id(prefix: str, *parts: object) -> str:
     joined = "\x1f".join("" if part is None else str(part) for part in parts)
-    return f"{prefix}_{sha256_text(joined)[:24]}"
+    return f"{prefix}_{raw_sha256_text(joined)[:24]}"
 
 
 def redact_secrets(text: str) -> str:
@@ -133,6 +164,28 @@ def markdown_code(value: object) -> str:
     if "`" not in text:
         return f"`{escaped}`"
     return f"<code>{escaped}</code>"
+
+
+def escape_html_text(value: object, *, quote: bool = True) -> str:
+    return html.escape(_display_text(value), quote=quote)
+
+
+def redact_home_paths(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: redact_home_paths(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_home_paths(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_home_paths(item) for item in value)
+    if isinstance(value, str):
+        return _redact_home_path_text(value)
+    return value
+
+
+def _redact_home_path_text(text: str) -> str:
+    text = re.sub(r"/Users/[^/\s|:;,)>\"]+", "~", text)
+    text = re.sub(r"/home/[^/\s|:;,)>\"]+", "~", text)
+    return text
 
 
 def _display_text(value: object) -> str:
@@ -218,11 +271,11 @@ def extract_call_targets(value: Any) -> set[str]:
         return set()
     targets: set[str] = set()
     for match in re.finditer(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE):
-        parsed = urlparse(match.group(0))
+        parsed = _safe_urlparse(match.group(0))
         if parsed.hostname:
             targets.add(parsed.hostname.lower())
     for token in _command_tokens(text):
-        parsed = urlparse(token)
+        parsed = _safe_urlparse(token)
         if parsed.scheme in {"http", "https"} and parsed.hostname:
             targets.add(parsed.hostname.lower())
             continue
@@ -233,6 +286,13 @@ def extract_call_targets(value: Any) -> set[str]:
         if HOST_PATTERN.fullmatch(possible_host) and not _looks_like_local_file(possible_host):
             targets.add(possible_host.lower())
     return targets
+
+
+def _safe_urlparse(value: str):
+    try:
+        return urlparse(value)
+    except ValueError:
+        return urlparse("")
 
 
 def _command_tokens(text: str) -> list[str]:

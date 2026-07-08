@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import app_paths, load_config
+from .db import init_db
+from .readers import default_registry
 from .self_check import run_self_check
 from .util import sha256_text, utc_now_iso
 
@@ -48,6 +50,12 @@ def collect_doctor_report(
 ) -> dict[str, Any]:
     bounded_max_files = max(1, int(max_files))
     paths = app_paths(app_dir)
+    db_error = None
+    if paths["db"].exists():
+        try:
+            init_db(paths["db"])
+        except Exception as exc:
+            db_error = {"type": type(exc).__name__, "message": str(exc)}
     config_error = None
     try:
         config = load_config(app_dir)
@@ -67,6 +75,7 @@ def collect_doctor_report(
         provider="claude",
         max_files=bounded_max_files,
     )
+    provider_rows, provider_load_errors = _provider_info(paths)
     report: dict[str, Any] = {
         "schemaVersion": 1,
         "generatedAt": utc_now_iso(),
@@ -81,7 +90,10 @@ def collect_doctor_report(
         },
         "python": _python_info(),
         "aicg": _aicg_paths(paths),
+        "providers": provider_rows,
+        "providerLoadErrors": provider_load_errors,
         "configError": config_error,
+        "dbError": db_error,
         "codex": _codex_info(codex_home, online=online, max_files=bounded_max_files),
         "claude": _claude_info(claude_root, max_files=bounded_max_files),
         "largeFiles": _large_files(
@@ -121,6 +133,15 @@ def format_doctor_markdown(report: dict[str, Any]) -> str:
     ]
     for item in report["aicg"]["paths"]:
         lines.append(f"- {item['name']}: {item['path']} ({item['status']})")
+    lines.extend(["", "## Providers"])
+    for row in report.get("providers", []):
+        lines.append(
+            f"- {row['provider']}: origin={row.get('origin')}, verified={str(row.get('verified')).lower()}, version={row.get('version') or 'unknown'}"
+        )
+    for error in report.get("providerLoadErrors", []):
+        lines.append(
+            f"- load error: {error.get('entryPoint') or error.get('module')} ({error.get('errorType')}: {error.get('message')})"
+        )
 
     codex = report["codex"]
     lines.extend(
@@ -226,6 +247,37 @@ def _aicg_paths(paths: dict[str, Path]) -> dict[str, Any]:
             }
         )
     return {"paths": items}
+
+
+def _provider_info(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    verified = _load_provider_verifications(paths)
+    try:
+        registry = default_registry(verified_plugins=verified)
+    except Exception as exc:
+        return [], [
+            {
+                "entryPoint": "aicg.providers",
+                "module": "unknown",
+                "errorType": type(exc).__name__,
+                "message": str(exc),
+            }
+        ]
+    return registry.rows(), registry.load_errors()
+
+
+def _load_provider_verifications(paths: dict[str, Path]) -> dict[str, object]:
+    path = paths["app"] / "provider-verifications.json"
+    if not path.exists():
+        return {"formatVersion": 2, "records": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"formatVersion": 2, "records": []}
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        return {"formatVersion": 1, "verified": [str(item) for item in data if item]}
+    return {"formatVersion": 2, "records": []}
 
 
 def _codex_info(codex_home: Path, *, online: bool, max_files: int) -> dict[str, Any]:

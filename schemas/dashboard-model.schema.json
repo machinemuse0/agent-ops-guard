@@ -1,0 +1,15 @@
+{
+  "title": "AgentOps Guard Dashboard Model",
+  "schemaVersion": 1,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "period",
+    "limit",
+    "currentReport",
+    "snapshots",
+    "trends",
+    "reviewRecurringTop",
+    "alertHistory"
+  ]
+}

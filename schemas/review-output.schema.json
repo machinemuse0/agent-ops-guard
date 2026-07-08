@@ -1,0 +1,9 @@
+{
+  "title": "AgentOps Guard Review Output",
+  "schemaVersion": 1,
+  "required": [
+    "schemaVersion",
+    "rulesetVersion",
+    "kind"
+  ]
+}

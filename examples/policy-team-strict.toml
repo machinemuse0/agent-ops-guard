@@ -1,0 +1,9 @@
+[policy]
+restricted_services = ["prod-db", "payment-admin", "customer-data"]
+secret_patterns = ["sk-[A-Za-z0-9]{20,}", "AKIA[0-9A-Z]{16}", "ghp_[A-Za-z0-9]{36}"]
+
+[alerts]
+daily_cost_usd_max = 20.0
+daily_waste_rate_max = 0.2
+new_policy_violations_max = 0
+interrupted_sessions_max = 2

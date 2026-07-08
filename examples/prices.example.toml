@@ -1,0 +1,15 @@
+[prices."codex:gpt-5.5"]
+input_per_mtok_usd = 0
+cached_input_per_mtok_usd = 0
+output_per_mtok_usd = 0
+cache_creation_input_per_mtok_usd = 0
+cache_read_input_per_mtok_usd = 0
+credit_per_usd = 1
+
+[prices."claude:claude-sonnet-4-20250514"]
+input_per_mtok_usd = 0
+cached_input_per_mtok_usd = 0
+output_per_mtok_usd = 0
+cache_creation_input_per_mtok_usd = 0
+cache_read_input_per_mtok_usd = 0
+credit_per_usd = 1

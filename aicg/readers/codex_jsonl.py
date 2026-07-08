@@ -23,6 +23,7 @@ from ..util import (
     flags_to_text,
     hash_file,
     normalize_timestamp,
+    raw_hash_file,
     redact_secrets,
     sha256_text,
     stable_id,
@@ -90,6 +91,7 @@ class CodexJsonlReader:
     def read(self, path: Path) -> ParsedRecords:
         source = Path(path)
         source_hash = hash_file(source)
+        source_identity_hash = raw_hash_file(source)
         created_at = utc_now_iso()
         session: NormalizedSession | None = None
         turns: list[NormalizedTurn] = []
@@ -121,14 +123,14 @@ class CodexJsonlReader:
             session_id = (
                 stable_id("session", self.provider, raw_session_id)
                 if raw_session_id
-                else stable_id("session", self.provider, source_hash)
+                else stable_id("session", self.provider, source_identity_hash)
             )
             timestamp = _event_timestamp(event or {})
             session = NormalizedSession(
                 id=session_id,
                 provider=self.provider,
                 native_session_id=raw_session_id,
-                lineage_id=raw_session_id or source_hash,
+                lineage_id=raw_session_id or source_identity_hash,
                 project_path=_project_path(payload),
                 source_file=str(source),
                 source_file_hash=source_hash,
@@ -158,8 +160,8 @@ class CodexJsonlReader:
                 current_turn.source_line_end = current_line_number or current_turn.source_line_end
                 return current_turn
             turn_index += 1
-            identity = raw_id or f"{source_hash}:{turn_index}"
-            native_turn_key = f"{self.provider}:{identity}" if raw_id else f"{self.provider}:{source_hash}:{turn_index}"
+            identity = raw_id or f"{source_identity_hash}:{turn_index}"
+            native_turn_key = f"{self.provider}:{identity}" if raw_id else f"{self.provider}:{source_identity_hash}:{turn_index}"
             current_turn = NormalizedTurn(
                 id=stable_id("turn", active_session.id, identity),
                 session_id=active_session.id,
@@ -316,6 +318,7 @@ class CodexJsonlReader:
                         _int_or_none(item_payload.get("exit_code")),
                         _call_target_from_payload(item_payload),
                         source_hash,
+                        source_identity_hash,
                         current_line_number,
                     )
                     surface = "call" if event_type == "item.started" else "output"
@@ -358,6 +361,7 @@ class CodexJsonlReader:
                             None,
                             None if response_type.endswith("_output") else _call_target_from_payload(payload),
                             source_hash,
+                            source_identity_hash,
                             current_line_number,
                         )
                         surface = "output" if response_type.endswith("_output") else "call"
@@ -724,6 +728,7 @@ def _upsert_tool_event(
     exit_code: int | None,
     call_target: str | None,
     source_file_hash: str | None,
+    source_identity_hash: str | None,
     source_line: int | None,
 ) -> NormalizedToolEvent:
     tool: NormalizedToolEvent | None = None
@@ -735,7 +740,7 @@ def _upsert_tool_event(
                 "tool",
                 session.id,
                 current_turn.id if current_turn else "",
-                raw_item_id or f"{source_file_hash}:{item_index}",
+                raw_item_id or f"{source_identity_hash}:{item_index}",
             ),
             session_id=session.id,
             turn_id=current_turn.id if current_turn else None,

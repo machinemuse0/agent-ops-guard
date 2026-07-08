@@ -76,7 +76,7 @@ def test_cli_policy_check_and_ack(tmp_path):
     with sqlite3.connect(aicg_home / "aicg.sqlite") as conn:
         stored_reason = conn.execute("SELECT reason FROM policy_acks WHERE finding_id = ?", (finding_id,)).fetchone()[0]
     assert secret_reason not in stored_reason
-    assert stored_reason.startswith("sha256:")
+    assert stored_reason.startswith("hmac-sha256:")
 
 
 def test_policy_check_ignores_output_url_mentions(tmp_path):

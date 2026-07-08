@@ -455,11 +455,22 @@ def _policy_lifecycle_model(conn: sqlite3.Connection, cutoff_iso: str) -> dict[s
         ORDER BY level
         """
     ).fetchall()
+    new_by_level = conn.execute(
+        """
+        SELECT level, COUNT(*) AS count
+        FROM policy_findings
+        WHERE first_seen_at >= ?
+        GROUP BY level
+        ORDER BY level
+        """,
+        (cutoff_iso,),
+    ).fetchall()
     return {
         "new": int(row["new_count"] or 0),
         "open": int(row["open_count"] or 0),
         "acked": int(row["acked_count"] or 0),
         "openByLevel": {item["level"]: int(item["count"]) for item in by_level},
+        "newByLevel": {item["level"]: int(item["count"]) for item in new_by_level},
     }
 
 
@@ -753,6 +764,9 @@ def _policy_lifecycle_markdown(model: dict[str, Any]) -> list[str]:
     by_level = model.get("openByLevel") or {}
     if by_level:
         lines.append("- Open by level: " + ", ".join(f"{key}={value}" for key, value in sorted(by_level.items())))
+    new_by_level = model.get("newByLevel") or {}
+    if new_by_level:
+        lines.append("- New by level: " + ", ".join(f"{key}={value}" for key, value in sorted(new_by_level.items())))
     return lines
 
 

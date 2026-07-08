@@ -23,7 +23,7 @@ def test_cli_version_matches_package_metadata():
     pyproject = tomllib.loads((Path.cwd() / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert result.returncode == 0, result.stderr
-    assert aicg.__version__ == "0.6.0"
+    assert aicg.__version__ == "0.8.0"
     assert pyproject["project"]["version"] == aicg.__version__
     assert aicg.__version__ in result.stdout
 
