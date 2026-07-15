@@ -155,7 +155,7 @@ def render_issue_template(review: SessionReview) -> str:
             lines.append(f"  Recommendation: {_md_text(finding['recommendation'])}")
     lines.extend(["", "## Evidence Pointers", ""])
     lines.extend(_evidence_markdown(findings))
-    lines.extend(["", "## Reproduce", "", f"```bash", f"python -m aicg inspect session {session['id']}", "```", ""])
+    lines.extend(["", "## Reproduce", "", "```bash", f"python -m aicg inspect session {session['id']}", "```", ""])
     lines.extend([
         "## Resolve Source",
         "",

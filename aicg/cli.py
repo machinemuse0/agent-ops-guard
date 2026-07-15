@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from . import __version__
@@ -31,6 +32,7 @@ from .dashboard import (
     render_summary_html,
 )
 from .db import (
+    CURRENT_SCHEMA_VERSION,
     ack_policy_finding,
     backup_database,
     clear_scan_error,
@@ -51,6 +53,7 @@ from .db import (
     upsert_scan_state,
 )
 from .doctor import collect_doctor_report, format_doctor_markdown
+from .fixture_redact import RedactionError, redact_fixture
 from .models import NormalizedSession, NormalizedTurn, ParsedRecords
 from .policy import (
     evaluate_policy_findings,
@@ -66,6 +69,7 @@ from .readers.registry import entry_points_for_module, module_file_hash, module_
 from .reporter import build_daily_report, render_markdown_report
 from .review import (
     CONFIDENCE_ORDER,
+    REVIEW_RULESET_VERSION,
     build_batch_review_model,
     build_project_review_model,
     build_session_review_model,
@@ -76,6 +80,13 @@ from .review import (
     render_review_markdown,
 )
 from .schedule import render_schedule_text
+from .security_audit import (
+    build_security_audit_model,
+    render_security_audit_json,
+    render_security_audit_markdown,
+    should_fail_security_audit,
+)
+from .support import SupportBundleError, build_support_bundle, write_support_bundle
 from .util import (
     detect_privacy_flags,
     escape_markdown_text,
@@ -93,6 +104,9 @@ from .util import (
 
 
 DEFAULT_PROJECT_REVIEW_LIMIT = 200
+CAPTURE_STDOUT_CHUNK_BYTES = 8192
+CAPTURE_PENDING_STDOUT_MAX_CHARS = 1024 * 1024
+CAPTURE_REDACTION_OVERLAP_CHARS = 8192
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -119,7 +133,11 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m aicg")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__} (schema {CURRENT_SCHEMA_VERSION}, ruleset {REVIEW_RULESET_VERSION})",
+    )
     parser.add_argument("--debug", action="store_true", help="Show full tracebacks for runtime errors")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -217,6 +235,21 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--redact-paths", action="store_true")
     export_parser.set_defaults(func=cmd_export)
 
+    fixture_parser = subparsers.add_parser("fixture", help="Prepare sanitized provider fixtures")
+    fixture_subparsers = fixture_parser.add_subparsers(dest="fixture_command", required=True)
+    fixture_redact_parser = fixture_subparsers.add_parser("redact", help="Redact a JSONL fixture")
+    fixture_redact_parser.add_argument("input_jsonl")
+    fixture_redact_parser.add_argument("--out", required=True)
+    fixture_redact_parser.add_argument("--keep-structure", action="store_true")
+    fixture_redact_parser.set_defaults(func=cmd_fixture_redact)
+
+    support_parser = subparsers.add_parser("support", help="Create local support artifacts")
+    support_subparsers = support_parser.add_subparsers(dest="support_command", required=True)
+    support_bundle_parser = support_subparsers.add_parser("bundle", help="Create a no-upload support bundle")
+    support_bundle_parser.add_argument("--out", required=True)
+    support_bundle_parser.add_argument("--include-config", action="store_true")
+    support_bundle_parser.set_defaults(func=cmd_support_bundle)
+
     policy_parser = subparsers.add_parser("policy", help="Check local policy findings")
     policy_subparsers = policy_parser.add_subparsers(dest="policy_command", required=True)
     policy_check = policy_subparsers.add_parser("check", help="Evaluate policy findings")
@@ -232,6 +265,15 @@ def build_parser() -> argparse.ArgumentParser:
     policy_ack.add_argument("finding_id")
     policy_ack.add_argument("--reason")
     policy_ack.set_defaults(func=cmd_policy_ack)
+
+    security_parser = subparsers.add_parser("security", help="Run local security audits")
+    security_subparsers = security_parser.add_subparsers(dest="security_command", required=True)
+    security_audit = security_subparsers.add_parser("audit", help="Audit local agent command security metadata")
+    security_audit.add_argument("--since", default="24h")
+    security_audit.add_argument("--format", choices=["md", "json"], default="md")
+    security_audit.add_argument("--out")
+    security_audit.add_argument("--fail-on", choices=["high", "medium", "low", "none"], default="high")
+    security_audit.set_defaults(func=cmd_security_audit)
 
     review_parser = subparsers.add_parser("review", help="Diagnose failed or wasteful sessions")
     review_parser.add_argument("--session", help="Review one session id")
@@ -362,7 +404,7 @@ def cmd_capture(args: argparse.Namespace) -> int:
         pending_stdout = ""
         capture_policy = load_policy() if raw_handle is not None else None
         while True:
-            chunk = process.stdout.read(8192)
+            chunk = process.stdout.read(CAPTURE_STDOUT_CHUNK_BYTES)
             if not chunk:
                 break
             sys.stdout.buffer.write(chunk)
@@ -370,6 +412,7 @@ def cmd_capture(args: argparse.Namespace) -> int:
             if raw_handle is not None:
                 pending_stdout += decoder.decode(chunk)
                 pending_stdout = _flush_redacted_stdout_lines(raw_handle, pending_stdout, capture_policy)
+                pending_stdout = _flush_redacted_stdout_limit(raw_handle, pending_stdout, capture_policy)
         if raw_handle is not None:
             pending_stdout += decoder.decode(b"", final=True)
             _write_redacted_stdout(raw_handle, pending_stdout, capture_policy)
@@ -406,6 +449,24 @@ def _flush_redacted_stdout_lines(raw_handle, pending_text: str, policy) -> str:
     return pending_text
 
 
+def _flush_redacted_stdout_limit(
+    raw_handle,
+    pending_text: str,
+    policy,
+    *,
+    max_chars: int = CAPTURE_PENDING_STDOUT_MAX_CHARS,
+    overlap_chars: int = CAPTURE_REDACTION_OVERLAP_CHARS,
+) -> str:
+    if len(pending_text) <= max_chars:
+        return pending_text
+    overlap = max(0, min(overlap_chars, max_chars))
+    flush_chars = len(pending_text) - overlap
+    if flush_chars <= 0:
+        return pending_text
+    _write_redacted_stdout(raw_handle, pending_text[:flush_chars], policy)
+    return pending_text[flush_chars:]
+
+
 def _write_redacted_stdout(raw_handle, text: str, policy) -> None:
     if not text:
         return
@@ -435,6 +496,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     files_skipped = 0
     files_failed = 0
     malformed_lines = 0
+    unknown_event_types: Counter[str] = Counter()
+    unrecognized_field_count = 0
+    total_field_count = 0
     totals = {"sessions": 0, "turns": 0, "tool_events": 0}
     affected_session_ids: list[str] = []
 
@@ -454,6 +518,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
                     continue
                 files_scanned += 1
                 malformed_lines += records.malformed_line_count
+                unknown_event_types.update(records.unknown_event_types or {})
+                unrecognized_field_count += int(records.unrecognized_field_count or 0)
+                total_field_count += int(records.total_field_count or 0)
                 counts = import_records(conn, records)
                 _update_scan_state(conn, reader.provider, path, records)
                 for key in totals:
@@ -474,6 +541,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print(f"turns inserted/updated: {totals['turns']}")
     print(f"tool events inserted/updated: {totals['tool_events']}")
     print(f"malformed lines: {malformed_lines}")
+    print(_format_drift_summary(unknown_event_types, unrecognized_field_count, total_field_count))
     _print_provider_load_warnings(provider_load_errors)
     return 0
 
@@ -691,6 +759,8 @@ def cmd_export(args: argparse.Namespace) -> int:
     out_path = Path(args.out).expanduser()
     if not out_path.is_absolute():
         out_path = paths["reports"] / out_path
+    if args.format not in {"json", "csv"}:
+        raise ValueError("normalized metadata export requires --format json or csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(paths["db"]) as conn:
         rows = _export_rows(conn, args.kind, cutoff_iso)
@@ -710,6 +780,43 @@ def cmd_export(args: argparse.Namespace) -> int:
     else:
         _write_csv(out_path, rows, EXPORT_TABLES[args.kind][2])
     print(f"export written: {out_path}")
+    return 0
+
+
+def cmd_fixture_redact(args: argparse.Namespace) -> int:
+    input_path = Path(args.input_jsonl).expanduser()
+    if not input_path.exists():
+        print(f"error: fixture input not found: {input_path}", file=sys.stderr)
+        return 1
+    out_path = Path(args.out).expanduser()
+    if not out_path.is_absolute():
+        out_path = Path.cwd() / out_path
+    try:
+        stats = redact_fixture(input_path, out_path, keep_structure=bool(args.keep_structure))
+    except RedactionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    print(f"redacted fixture written: {out_path}")
+    print(f"lines processed: {stats['lines']}")
+    print(f"malformed lines redacted: {stats['malformed']}")
+    print(f"path aliases: {stats['pathAliases']}")
+    return 0
+
+
+def cmd_support_bundle(args: argparse.Namespace) -> int:
+    paths = app_paths()
+    ensure_app_dirs()
+    init_db(paths["db"])
+    out_path = _output_path(paths, args.out)
+    try:
+        bundle = build_support_bundle(include_config=bool(args.include_config))
+        write_support_bundle(out_path, bundle)
+    except SupportBundleError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    print(f"support bundle written: {out_path}")
+    print(f"includes config: {str(bool(args.include_config)).lower()}")
+    print("review required: please inspect this file before sharing it manually.")
     return 0
 
 
@@ -769,6 +876,24 @@ def cmd_policy_ack(args: argparse.Namespace) -> int:
         conn.commit()
     print(f"policy finding acknowledged: {args.finding_id}")
     return 0
+
+
+def cmd_security_audit(args: argparse.Namespace) -> int:
+    paths = app_paths()
+    ensure_app_dirs()
+    init_db(paths["db"])
+    cutoff_iso = isoformat_utc(parse_since(args.since))
+    with connect(paths["db"]) as conn:
+        model = build_security_audit_model(conn, since=cutoff_iso, label=args.since)
+    output = render_security_audit_json(model) if args.format == "json" else render_security_audit_markdown(model)
+    if args.out:
+        out_path = _output_path(paths, args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(output + "\n", encoding="utf-8")
+        print(f"security audit written: {out_path}")
+    else:
+        print(output)
+    return 3 if should_fail_security_audit(model, args.fail_on) else 0
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -1061,6 +1186,24 @@ def _print_provider_load_warnings(errors: list[dict[str, str]]) -> None:
         error_type = error.get("errorType") or "Error"
         message = error.get("message") or "provider failed to load"
         print(f"warning: provider plugin failed to load: {entry_point} ({error_type}: {message})", file=sys.stderr)
+
+
+def _format_drift_summary(
+    unknown_event_types: Counter[str],
+    unrecognized_field_count: int,
+    total_field_count: int,
+) -> str:
+    if not unknown_event_types and unrecognized_field_count <= 0:
+        return "format drift: none"
+    parts = []
+    if unknown_event_types:
+        total_unknown = sum(int(value) for value in unknown_event_types.values())
+        top = ", ".join(f"{name}={count}" for name, count in unknown_event_types.most_common(3))
+        parts.append(f"{total_unknown} unknown event type(s): {top}")
+    if unrecognized_field_count > 0:
+        ratio = (unrecognized_field_count / total_field_count) if total_field_count else 0.0
+        parts.append(f"unrecognized top-level fields={unrecognized_field_count} ({ratio:.1%})")
+    return "format drift: " + "; ".join(parts)
 
 
 def _store_provider_verification(
@@ -1673,6 +1816,16 @@ def _write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _row_dict(row) -> dict:

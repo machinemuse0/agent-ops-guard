@@ -1,0 +1,17 @@
+{
+  "title": "AgentOps Guard Provider Capability",
+  "schemaVersion": 1,
+  "required": [
+    "provider",
+    "origin",
+    "verified",
+    "version",
+    "token_usage",
+    "cache_semantics",
+    "tool_events",
+    "turn_status",
+    "session_resume",
+    "background_flag",
+    "native_cost"
+  ]
+}

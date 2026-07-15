@@ -8,7 +8,7 @@ from .tokens import total_tokens as provider_total_tokens
 from .util import escape_markdown_text, isoformat_utc, markdown_code, parse_since, split_flags, utc_now_iso
 
 
-DAILY_REPORT_SCHEMA_VERSION = 3
+DAILY_REPORT_SCHEMA_VERSION = 4
 
 
 def generate_markdown_report(
@@ -117,6 +117,7 @@ def build_daily_report(
     scan_error_count = _scan_error_count(conn, cutoff_iso)
     policy_lifecycle = _policy_lifecycle_model(conn, cutoff_iso)
     git_activity = _git_activity_model(conn, cutoff_iso)
+    format_drift = _format_drift_model(conn, cutoff_iso, config)
 
     total_turns = _count_for_sessions(conn, "turns", session_ids)
     total_tools = _count_for_sessions(conn, "tool_events", session_ids)
@@ -169,6 +170,7 @@ def build_daily_report(
         "wasteBreakdown": _waste_breakdown_model(token_rows, issue_rows),
         "efficiency": _efficiency_model(token_rows),
         "gitActivity": git_activity,
+        "formatDrift": format_drift,
         "highRiskIssues": [_issue_model(row) for row in issue_rows if row["severity"] == "high"],
         "lowerRiskIssueCount": sum(1 for row in issue_rows if row["severity"] != "high"),
         "recommendedFixes": _recommended_fixes_model(issue_rows, scan_error_count),
@@ -204,9 +206,14 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         cost_line,
         f"- Scan source failures: {overview['scanSourceFailures']}",
         "",
-        "## Project ranking",
-        "",
     ]
+    drift_warnings = (report.get("formatDrift") or {}).get("warnings") or []
+    if drift_warnings:
+        lines.extend(["## Format drift warnings", ""])
+        for warning in drift_warnings:
+            lines.append(f"- {escape_markdown_text(warning)}")
+        lines.append("")
+    lines.extend(["## Project ranking", ""])
     lines.extend(_project_ranking_markdown(report["projectRanking"]))
     lines.extend(["", "## Provider/model breakdown", ""])
     lines.extend(_provider_breakdown_markdown(report["providerModelBreakdown"]))
@@ -292,6 +299,60 @@ def _scan_error_count(conn: sqlite3.Connection, cutoff_iso: str) -> int:
         (cutoff_iso,),
     ).fetchone()
     return int(row["count"] or 0)
+
+
+def _format_drift_model(conn: sqlite3.Connection, cutoff_iso: str, config: dict | None) -> dict[str, Any]:
+    threshold = float(
+        ((config or {}).get("thresholds") or {}).get("format_drift_unknown_event_ratio", 0.05)
+    )
+    observations = [
+        {
+            "provider": row["provider"],
+            "observationKey": row["observation_key"],
+            "count": int(row["count"] or 0),
+            "firstSeenAt": row["first_seen_at"],
+            "lastSeenAt": row["last_seen_at"],
+        }
+        for row in conn.execute(
+            """
+            SELECT provider, observation_key, count, first_seen_at, last_seen_at
+            FROM format_observations
+            WHERE last_seen_at >= ?
+            ORDER BY provider, observation_key
+            """,
+            (cutoff_iso,),
+        ).fetchall()
+    ]
+    raw_event_totals = {
+        row["provider"]: int(row["raw_events"] or 0)
+        for row in conn.execute(
+            """
+            SELECT provider, COALESCE(SUM(raw_event_count), 0) AS raw_events
+            FROM sessions
+            WHERE COALESCE(started_at, created_at) >= ?
+            GROUP BY provider
+            """,
+            (cutoff_iso,),
+        ).fetchall()
+    }
+    warnings: list[str] = []
+    unknown_by_provider: dict[str, int] = {}
+    for observation in observations:
+        if str(observation["observationKey"]).startswith("unknown_event_type:"):
+            provider = str(observation["provider"])
+            unknown_by_provider[provider] = unknown_by_provider.get(provider, 0) + int(observation["count"])
+    for provider, unknown_count in sorted(unknown_by_provider.items()):
+        raw_total = max(raw_event_totals.get(provider, 0), 0)
+        ratio = min(1.0, (unknown_count / raw_total) if raw_total else 1.0)
+        if ratio >= threshold:
+            warnings.append(
+                f"token statistics may be incomplete: {provider} has unrecognized events ({unknown_count}/{raw_total or 'unknown'})"
+            )
+    return {
+        "threshold": threshold,
+        "observations": observations,
+        "warnings": warnings,
+    }
 
 
 def _total_tokens(row: sqlite3.Row | dict[str, Any]) -> int:

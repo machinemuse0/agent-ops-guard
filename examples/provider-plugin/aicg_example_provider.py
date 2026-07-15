@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 from aicg.models import NormalizedSession, NormalizedTurn, ParsedRecords
@@ -35,12 +36,16 @@ class ExampleProviderReader:
     def read(self, path: Path) -> ParsedRecords:
         sessions: list[NormalizedSession] = []
         turns: list[NormalizedTurn] = []
+        unknown_event_types: Counter[str] = Counter()
         malformed = 0
         for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 malformed += 1
+                continue
+            if row.get("type") == "aicg.future_event" or "session_id" not in row:
+                unknown_event_types[str(row.get("type") or "<missing>")] += 1
                 continue
             session_id = f"example:{row['session_id']}"
             turn_id = f"{session_id}:turn:{line_no}"
@@ -76,6 +81,7 @@ class ExampleProviderReader:
             turns=turns,
             malformed_line_count=malformed,
             source_file=str(path),
+            unknown_event_types=unknown_event_types,
         )
 
 

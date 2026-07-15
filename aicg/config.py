@@ -21,6 +21,7 @@ DEFAULT_CONFIG = {
         "project_hotspot_failure_rate": 0.5,
         "long_running_minutes": 60,
         "large_history_file_bytes": 104857600,
+        "format_drift_unknown_event_ratio": 0.05,
     },
     "prices": {},
     "review": {
@@ -39,6 +40,8 @@ DEFAULT_CONFIG = {
         "model_fallback_failure_multiplier": 2.0,
     },
     "alerts": {},
+    "budget": {"windows": []},
+    "team": {"member_label": "", "projects": []},
 }
 
 
@@ -57,6 +60,7 @@ project_hotspot_min_sessions = 2
 project_hotspot_failure_rate = 0.5
 long_running_minutes = 60
 large_history_file_bytes = 104857600
+format_drift_unknown_event_ratio = 0.05
 
 [prices]
 # Model prices are intentionally blank by default.
@@ -66,7 +70,6 @@ large_history_file_bytes = 104857600
 # input_per_mtok_usd = 0
 # cached_input_per_mtok_usd = 0
 # output_per_mtok_usd = 0
-# reasoning_output_per_mtok_usd = 0
 # cache_creation_input_per_mtok_usd = 0
 # cache_read_input_per_mtok_usd = 0
 # credit_per_usd = 1
@@ -91,6 +94,20 @@ model_fallback_failure_multiplier = 2.0
 # daily_waste_rate_max = 0.3
 # new_policy_violations_max = 0
 # interrupted_sessions_max = 3
+
+# [[budget.windows]]
+# name = "codex-5h"
+# provider = "codex"
+# window = "5h"
+# max_tokens = 1000000
+# max_cost_usd = 10.0
+
+# [team]
+# member_label = "developer-1"
+#
+# [[team.projects]]
+# alias = "project-a"
+# path = "/absolute/local/path"
 """
 
 
@@ -160,6 +177,11 @@ def load_config(app_dir: Path | None = None) -> dict:
         "prices": dict(DEFAULT_CONFIG["prices"]),
         "review": dict(DEFAULT_CONFIG["review"]),
         "alerts": dict(DEFAULT_CONFIG["alerts"]),
+        "budget": {"windows": list(DEFAULT_CONFIG["budget"]["windows"])},
+        "team": {
+            "member_label": DEFAULT_CONFIG["team"]["member_label"],
+            "projects": list(DEFAULT_CONFIG["team"]["projects"]),
+        },
     }
     if paths["config"].exists():
         with paths["config"].open("rb") as handle:

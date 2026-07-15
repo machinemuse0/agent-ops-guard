@@ -30,7 +30,30 @@ jobs:
         run: python -m pytest -q
       - name: Installed wheel smoke
         run: |
-          python -c "import os, subprocess, sys, tempfile; cwd = tempfile.mkdtemp(); home = os.path.join(cwd, 'aicg-home'); env = dict(os.environ, AICG_HOME=home); subprocess.check_call([sys.executable, '-m', 'aicg', 'init'], cwd=cwd, env=env); subprocess.check_call([sys.executable, '-m', 'aicg', 'doctor', '--self-check', '--json'], cwd=cwd, env=env)"
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import sys
+          import tempfile
+
+          cwd = tempfile.mkdtemp()
+          home = os.path.join(cwd, 'aicg-home')
+          env = dict(os.environ, AICG_HOME=home)
+          subprocess.check_call([sys.executable, '-m', 'aicg', 'init'], cwd=cwd, env=env)
+          version = subprocess.check_output([sys.executable, '-m', 'aicg', '--version'], cwd=cwd, env=env, text=True)
+          assert 'schema 10' in version and 'ruleset 2' in version
+          doctor = subprocess.check_output([sys.executable, '-m', 'aicg', 'doctor', '--self-check', '--json'], cwd=cwd, env=env, text=True)
+          assert json.loads(doctor)['selfCheck']['status'] == 'pass'
+          subprocess.check_call([sys.executable, '-m', 'aicg', 'support', 'bundle', '--out', 'bundle.json'], cwd=cwd, env=env)
+          bundle = pathlib.Path(home, 'reports', 'bundle.json').read_text(encoding='utf-8')
+          assert 'hash_salt' not in bundle and home not in bundle
+          provider_env = dict(env, PYTHONPATH='examples/provider-plugin')
+          subprocess.check_call([sys.executable, '-m', 'aicg', 'providers', 'verify', 'aicg_example_provider', '--fixtures', 'examples/provider-plugin/fixtures', '--format', 'json'], env=provider_env)
+          for name in ('daily-report', 'dashboard-model', 'review-output', 'export-output', 'provider-capability'):
+              assert pathlib.Path(sys.prefix, 'schemas', f'{name}.schema.json').exists()
+          PY
       - name: Verify example provider
         run: python -m aicg providers verify aicg_example_provider --fixtures examples/provider-plugin/fixtures --format json
         env:
@@ -58,6 +81,7 @@ jobs:
           python -m aicg --help
           python -m aicg providers --help
           python -m aicg export --help
+          python scripts/check_release_ready.py
 
   build:
     name: build artifacts

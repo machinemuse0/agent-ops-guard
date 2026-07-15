@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from typing import Any
 
 from .models import AlertEvent
@@ -79,14 +78,11 @@ def alert_events_from_model(model: dict[str, Any]) -> list[AlertEvent]:
     for finding in model.get("findings") or []:
         event_id = stable_id(
             "alert",
-            uuid.uuid4().hex,
-            created_at,
             period_type,
             period_start,
             finding.get("key"),
             finding.get("threshold"),
             finding.get("actual"),
-            report_hash,
             config_hash,
         )
         events.append(

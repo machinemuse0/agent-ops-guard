@@ -60,6 +60,58 @@ def test_claude_reader_updates_session_id_after_summary_line(tmp_path):
 
     assert records.sessions[0].id == stable_id("session", "claude", "real-session")
     assert records.turns[0].session_id == records.sessions[0].id
+    assert not records.unknown_event_types
+
+
+def test_claude_reader_counts_usage_on_known_side_events(tmp_path):
+    path = tmp_path / "claude-side-event-usage.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "attachment",
+                "sessionId": "side-usage-session",
+                "uuid": "attachment-1",
+                "timestamp": "2026-07-05T00:00:00Z",
+                "usage": {
+                    "input_tokens": 7,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 0,
+                },
+                "attachment": {"name": "notes.txt"},
+            },
+            {
+                "type": "ai-title",
+                "sessionId": "side-usage-session",
+                "uuid": "title-1",
+                "timestamp": "2026-07-05T00:00:01Z",
+                "title": "short title",
+            },
+            {
+                "type": "last-prompt",
+                "sessionId": "side-usage-session",
+                "uuid": "prompt-1",
+                "timestamp": "2026-07-05T00:00:02Z",
+                "message": {
+                    "usage": {
+                        "input_tokens": 11,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 5,
+                        "output_tokens": 1,
+                    }
+                },
+            },
+        ],
+    )
+
+    records = ClaudeJsonlReader().read(path)
+
+    assert not records.unknown_event_types
+    assert len(records.turns) == 2
+    assert sum(turn.input_tokens for turn in records.turns) == 18
+    assert sum(turn.cache_read_input_tokens for turn in records.turns) == 8
+    assert {turn.token_flags for turn in records.turns} == {"CLAUDE_SIDE_EVENT_USAGE"}
 
 
 def test_claude_resume_history_message_ids_dedupe_across_sessions(tmp_path):

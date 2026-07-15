@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from .base import Capabilities
 from ..policy import EffectivePolicy, load_policy, sensitive_policy_findings, sensitive_policy_flags
+from ..security_audit import derive_security_tool_metadata
 from ..models import (
     PolicyFinding,
     NormalizedSession,
@@ -57,6 +59,35 @@ TOOL_TYPE_MAP = {
 }
 
 
+KNOWN_EVENT_TYPES = {
+    "session_meta",
+    "thread.started",
+    "turn_context",
+    "event_msg",
+    "turn.started",
+    "turn.completed",
+    "turn.failed",
+    "error",
+    "item.started",
+    "item.completed",
+    "response_item",
+}
+
+
+KNOWN_TOP_LEVEL_FIELDS = {
+    "type",
+    "event",
+    "event_type",
+    "timestamp",
+    "time",
+    "created_at",
+    "started_at",
+    "ended_at",
+    "payload",
+    "item",
+}
+
+
 class CodexJsonlReader:
     provider = "codex"
 
@@ -104,6 +135,9 @@ class CodexJsonlReader:
         item_index = 0
         raw_event_count = 0
         malformed_line_count = 0
+        unknown_event_types: Counter[str] = Counter()
+        unrecognized_field_count = 0
+        total_field_count = 0
         current_line_number = 0
         first_seen_at: str | None = None
         last_seen_at: str | None = None
@@ -120,6 +154,13 @@ class CodexJsonlReader:
                 session.source_line_end = current_line_number or session.source_line_end
                 return session
             raw_session_id = _first_str(payload, "id", "thread_id", "session_id")
+            parent_session_id = _first_str(
+                payload,
+                "parent_thread_id",
+                "parent_session_id",
+                "parentThreadId",
+                "parentSessionId",
+            )
             session_id = (
                 stable_id("session", self.provider, raw_session_id)
                 if raw_session_id
@@ -130,7 +171,8 @@ class CodexJsonlReader:
                 id=session_id,
                 provider=self.provider,
                 native_session_id=raw_session_id,
-                lineage_id=raw_session_id or source_identity_hash,
+                lineage_id=parent_session_id or raw_session_id or source_identity_hash,
+                parent_session_id=parent_session_id,
                 project_path=_project_path(payload),
                 source_file=str(source),
                 source_file_hash=source_hash,
@@ -209,6 +251,10 @@ class CodexJsonlReader:
 
                 raw_event_count += 1
                 event_type = _event_type(event)
+                unknown_event_types.update(_unknown_event_type_labels(event_type))
+                unknown_fields, total_fields = _top_level_field_drift(event, KNOWN_TOP_LEVEL_FIELDS)
+                unrecognized_field_count += unknown_fields
+                total_field_count += total_fields
                 payload = _payload(event)
                 event_time = _event_timestamp(event)
                 if event_time and first_seen_at is None:
@@ -317,6 +363,7 @@ class CodexJsonlReader:
                         _estimate_output_bytes(item_payload),
                         _int_or_none(item_payload.get("exit_code")),
                         _call_target_from_payload(item_payload),
+                        derive_security_tool_metadata(_surface_payload(item_payload, "call")),
                         source_hash,
                         source_identity_hash,
                         current_line_number,
@@ -357,13 +404,14 @@ class CodexJsonlReader:
                             status,
                             event_time,
                             event_time if response_type.endswith("_output") else None,
-                            _estimate_output_bytes(payload),
-                            None,
-                            None if response_type.endswith("_output") else _call_target_from_payload(payload),
-                            source_hash,
-                            source_identity_hash,
-                            current_line_number,
-                        )
+                        _estimate_output_bytes(payload),
+                        None,
+                        None if response_type.endswith("_output") else _call_target_from_payload(payload),
+                        None if response_type.endswith("_output") else derive_security_tool_metadata(payload),
+                        source_hash,
+                        source_identity_hash,
+                        current_line_number,
+                    )
                         surface = "output" if response_type.endswith("_output") else "call"
                         policy_findings.extend(
                             sensitive_policy_findings(
@@ -425,6 +473,10 @@ class CodexJsonlReader:
             malformed_line_count=malformed_line_count,
             source_file=str(source),
             source_file_hash=source_hash,
+            unknown_event_types=unknown_event_types,
+            unrecognized_field_ratio=(unrecognized_field_count / total_field_count) if total_field_count else 0.0,
+            unrecognized_field_count=unrecognized_field_count,
+            total_field_count=total_field_count,
         )
 
 
@@ -451,6 +503,20 @@ def _jsonl_files_since(root: Path, cutoff, known_sources: set[str] | None = None
 
 def _event_type(event: dict[str, Any]) -> str | None:
     return _first_str(event, "type", "event", "event_type")
+
+
+def _unknown_event_type_labels(event_type: str | None) -> list[str]:
+    if not event_type:
+        return ["<missing>"]
+    if event_type in KNOWN_EVENT_TYPES:
+        return []
+    return [event_type]
+
+
+def _top_level_field_drift(event: dict[str, Any], known_fields: set[str]) -> tuple[int, int]:
+    total = len(event)
+    unknown = sum(1 for key in event if key not in known_fields)
+    return unknown, total
 
 
 def _event_timestamp(event: dict[str, Any]) -> str | None:
@@ -494,6 +560,16 @@ def _merge_session_metadata(session: NormalizedSession, payload: dict[str, Any])
     session.model = session.model or _first_str(payload, "model")
     session.task_type = session.task_type or _task_type(payload)
     session.background_flag = session.background_flag or _is_background(payload)
+    parent_session_id = _first_str(
+        payload,
+        "parent_thread_id",
+        "parent_session_id",
+        "parentThreadId",
+        "parentSessionId",
+    )
+    if parent_session_id:
+        session.parent_session_id = parent_session_id
+        session.lineage_id = parent_session_id
 
 
 def _merge_turn_flags(
@@ -727,6 +803,7 @@ def _upsert_tool_event(
     output_bytes: int,
     exit_code: int | None,
     call_target: str | None,
+    security_metadata: dict[str, str | None] | None,
     source_file_hash: str | None,
     source_identity_hash: str | None,
     source_line: int | None,
@@ -756,6 +833,9 @@ def _upsert_tool_event(
             output_bytes=output_bytes,
             exit_code=exit_code,
             call_target=call_target,
+            security_flags=(security_metadata or {}).get("security_flags"),
+            security_detail=(security_metadata or {}).get("security_detail"),
+            command_hash=(security_metadata or {}).get("command_hash"),
         )
         tool_events.append(tool)
         if raw_item_id:
@@ -769,6 +849,9 @@ def _upsert_tool_event(
         tool.output_bytes = max(tool.output_bytes, output_bytes)
         tool.exit_code = exit_code if exit_code is not None else tool.exit_code
         tool.call_target = tool.call_target or call_target
+        tool.security_flags = tool.security_flags or (security_metadata or {}).get("security_flags")
+        tool.security_detail = tool.security_detail or (security_metadata or {}).get("security_detail")
+        tool.command_hash = tool.command_hash or (security_metadata or {}).get("command_hash")
         tool.source_file_hash = tool.source_file_hash or source_file_hash
         tool.source_line_start = tool.source_line_start or source_line
         tool.source_line_end = source_line or tool.source_line_end

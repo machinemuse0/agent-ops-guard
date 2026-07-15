@@ -23,9 +23,11 @@ def test_cli_version_matches_package_metadata():
     pyproject = tomllib.loads((Path.cwd() / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert result.returncode == 0, result.stderr
-    assert aicg.__version__ == "0.8.0"
+    assert aicg.__version__ == "0.9.0"
     assert pyproject["project"]["version"] == aicg.__version__
     assert aicg.__version__ in result.stdout
+    assert "schema 10" in result.stdout
+    assert "ruleset 2" in result.stdout
 
 
 def test_cli_scan_summary_and_doctor_outputs(tmp_path):

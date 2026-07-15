@@ -218,7 +218,7 @@ new_policy_violations_max = 0
     html = (aicg_home / "reports" / "dashboard.html").read_text(encoding="utf-8")
     assert "interrupted_sessions_max" in html
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0] >= 2
+        assert conn.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0] == 1
 
 
 def test_alerts_check_without_config_exits_zero(tmp_path):

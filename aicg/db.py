@@ -21,7 +21,7 @@ from .sqlite_utils import chunked
 from .util import set_hash_salt, sha256_text, stable_id, utc_now_iso
 
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 10
 
 
 DERIVED_TABLES = {
@@ -36,8 +36,8 @@ DERIVED_TABLES = {
     "review_findings",
     "review_evidence",
     "git_activity",
+    "format_observations",
 }
-
 
 USER_TABLES = {"runs", "report_snapshots", "policy_acks", "git_links", "alert_events"}
 
@@ -129,7 +129,10 @@ CREATE TABLE IF NOT EXISTS tool_events (
     duration_ms INTEGER,
     output_bytes INTEGER DEFAULT 0,
     exit_code INTEGER,
-    call_target TEXT
+    call_target TEXT,
+    security_flags TEXT,
+    security_detail TEXT,
+    command_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS issues (
@@ -271,6 +274,15 @@ CREATE TABLE IF NOT EXISTS git_activity (
     PRIMARY KEY (project_path, period_start)
 );
 
+CREATE TABLE IF NOT EXISTS format_observations (
+    provider TEXT NOT NULL,
+    observation_key TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (provider, observation_key)
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_hash ON sessions(source_file_hash);
 CREATE INDEX IF NOT EXISTS idx_sessions_project_path ON sessions(project_path);
@@ -292,6 +304,7 @@ CREATE INDEX IF NOT EXISTS idx_review_evidence_finding_id ON review_evidence(fin
 CREATE INDEX IF NOT EXISTS idx_review_evidence_session_id ON review_evidence(session_id);
 CREATE INDEX IF NOT EXISTS idx_git_activity_project_period ON git_activity(project_path, period_start);
 CREATE INDEX IF NOT EXISTS idx_alert_events_period_created ON alert_events(period_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_format_observations_provider ON format_observations(provider);
 """
 
 
@@ -335,6 +348,9 @@ COLUMN_MIGRATIONS = {
         "source_line_start": "source_line_start INTEGER",
         "source_line_end": "source_line_end INTEGER",
         "call_target": "call_target TEXT",
+        "security_flags": "security_flags TEXT",
+        "security_detail": "security_detail TEXT",
+        "command_hash": "command_hash TEXT",
     },
     "report_snapshots": {
         "dashboard_model_json": "dashboard_model_json TEXT",
@@ -422,6 +438,9 @@ REQUIRED_COLUMNS = {
         "output_bytes",
         "exit_code",
         "call_target",
+        "security_flags",
+        "security_detail",
+        "command_hash",
     },
     "issues": {"id", "session_id", "severity", "code", "title", "detail", "recommendation", "evidence", "created_at"},
     "issue_evidence": {
@@ -506,6 +525,7 @@ REQUIRED_COLUMNS = {
         "deletions",
         "synced_at",
     },
+    "format_observations": {"provider", "observation_key", "count", "first_seen_at", "last_seen_at"},
 }
 
 
@@ -849,8 +869,9 @@ def upsert_tool_event(conn: sqlite3.Connection, event: NormalizedToolEvent) -> N
         INSERT INTO tool_events (
             id, session_id, turn_id, provider, tool_type, tool_name, status,
             source_file_hash, source_line_start, source_line_end,
-            started_at, ended_at, duration_ms, output_bytes, exit_code, call_target
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            started_at, ended_at, duration_ms, output_bytes, exit_code, call_target,
+            security_flags, security_detail, command_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             session_id=excluded.session_id,
             turn_id=excluded.turn_id,
@@ -866,7 +887,10 @@ def upsert_tool_event(conn: sqlite3.Connection, event: NormalizedToolEvent) -> N
             duration_ms=excluded.duration_ms,
             output_bytes=excluded.output_bytes,
             exit_code=excluded.exit_code,
-            call_target=excluded.call_target
+            call_target=excluded.call_target,
+            security_flags=excluded.security_flags,
+            security_detail=excluded.security_detail,
+            command_hash=excluded.command_hash
         """,
         (
             event.id,
@@ -885,6 +909,9 @@ def upsert_tool_event(conn: sqlite3.Connection, event: NormalizedToolEvent) -> N
             event.output_bytes,
             event.exit_code,
             event.call_target,
+            event.security_flags,
+            event.security_detail,
+            event.command_hash,
         ),
     )
 
@@ -970,6 +997,7 @@ def import_records(conn: sqlite3.Connection, records: ParsedRecords) -> dict[str
         upsert_tool_event(conn, event)
     for finding in records.policy_findings:
         upsert_policy_finding(conn, finding)
+    upsert_format_observations(conn, records)
     return {
         "sessions": len(records.sessions),
         "turns": len(records.turns),
@@ -1207,6 +1235,62 @@ def upsert_scan_state(
     )
 
 
+def upsert_format_observations(conn: sqlite3.Connection, records: ParsedRecords) -> None:
+    provider = _records_provider(records)
+    if not provider:
+        return
+    now = utc_now_iso()
+    for event_type, count in sorted((records.unknown_event_types or {}).items()):
+        if int(count or 0) <= 0:
+            continue
+        _upsert_format_observation(
+            conn,
+            provider=provider,
+            observation_key=f"unknown_event_type:{event_type}",
+            count=int(count),
+            seen_at=now,
+        )
+    if records.unrecognized_field_count > 0:
+        _upsert_format_observation(
+            conn,
+            provider=provider,
+            observation_key="unrecognized_top_level_field",
+            count=int(records.unrecognized_field_count),
+            seen_at=now,
+        )
+
+
+def _records_provider(records: ParsedRecords) -> str | None:
+    for collection in (records.sessions, records.turns, records.tool_events, records.policy_findings):
+        for item in collection:
+            provider = getattr(item, "provider", None)
+            if provider:
+                return str(provider)
+    return None
+
+
+def _upsert_format_observation(
+    conn: sqlite3.Connection,
+    *,
+    provider: str,
+    observation_key: str,
+    count: int,
+    seen_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO format_observations (
+            provider, observation_key, count, first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(provider, observation_key) DO UPDATE SET
+            count=format_observations.count + excluded.count,
+            first_seen_at=MIN(format_observations.first_seen_at, excluded.first_seen_at),
+            last_seen_at=MAX(format_observations.last_seen_at, excluded.last_seen_at)
+        """,
+        (provider, observation_key, int(count), seen_at, seen_at),
+    )
+
+
 def upsert_policy_finding(conn: sqlite3.Connection, finding: PolicyFinding) -> None:
     conn.execute(
         """
@@ -1278,7 +1362,7 @@ def insert_alert_events(conn: sqlite3.Connection, events: list[AlertEvent]) -> N
     for event in events:
         conn.execute(
             """
-            INSERT INTO alert_events (
+            INSERT OR IGNORE INTO alert_events (
                 id, period_type, period_start, alert_key, threshold_value,
                 actual_value, report_hash, config_hash, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1353,6 +1437,7 @@ def count_rows(conn: sqlite3.Connection, table: str) -> int:
         "git_links",
         "git_activity",
         "alert_events",
+        "format_observations",
     }
     if table not in allowed:
         raise ValueError(f"Unsupported table: {table}")

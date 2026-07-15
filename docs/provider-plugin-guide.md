@@ -1,6 +1,6 @@
 # Provider Plugin Guide
 
-`v0.8` exposes a small provider API for local log readers. Plugins are loaded
+`v0.9` exposes a small provider API for local log readers. Plugins are loaded
 through the `aicg.providers` entry point group and must pass local conformance
 before they are loaded by default.
 
@@ -67,6 +67,8 @@ The verifier checks:
 - fixtures produce at least one normalized record
 - existing record ids remain stable after appending malformed JSONL
 - appended malformed lines do not crash the reader and increase malformed counts
+- appended unknown event types do not crash the reader and are counted in
+  `ParsedRecords.unknown_event_types`
 - providers with `turn_status=True` include an interrupted or truncated fixture
   whose records contain `status="interrupted"`
 - token buckets are non-negative
@@ -102,3 +104,9 @@ ignored.
 Provider readers must not store raw prompt, raw code, raw command output, or raw
 secrets in normalized records. Use hashes, metric counts, source line ranges,
 and coarse status fields instead.
+
+Use the fixture redaction helper before contributing real logs:
+
+```bash
+python -m aicg fixture redact raw.jsonl --out fixture.jsonl --keep-structure
+```

@@ -13,7 +13,7 @@ from .readers.registry import instantiate_reader
 from .util import SECRET_PATTERNS
 
 
-CONFORMANCE_VERSION = 1
+CONFORMANCE_VERSION = 2
 
 
 def load_reader_from_module(module_or_package: str) -> ProviderReader:
@@ -151,6 +151,7 @@ def _verify_fixture(reader: ProviderReader, path: Path) -> tuple[list[dict[str, 
         )
     )
     checks.extend(_verify_bad_line_resilience(reader, path, first))
+    checks.extend(_verify_unknown_event_observability(reader, path, first))
     return checks, _has_interrupted_status(first)
 
 
@@ -193,6 +194,39 @@ def _verify_bad_line_resilience(reader: ProviderReader, path: Path, first: Parse
             )
         )
     return checks
+
+
+def _verify_unknown_event_observability(reader: ProviderReader, path: Path, first: ParsedRecords) -> list[dict[str, Any]]:
+    check_id = f"fixture.{path.name}.unknown_event_observability"
+    event_type = "aicg.future_event"
+    baseline = int((first.unknown_event_types or {}).get(event_type, 0))
+    with tempfile.TemporaryDirectory(prefix="aicg-provider-fixture-") as tmpdir:
+        appended = Path(tmpdir) / path.name
+        appended.write_bytes(
+            path.read_bytes()
+            + b'\n{"type":"aicg.future_event","timestamp":"2026-07-08T00:00:00Z","payload":{"future":true},"futureField":true}\n'
+        )
+        try:
+            records = reader.read(appended)
+        except Exception as exc:
+            return [
+                _check(
+                    check_id,
+                    False,
+                    "reader counts unknown event types without failing",
+                    errorType=type(exc).__name__,
+                )
+            ]
+    count = int((records.unknown_event_types or {}).get(event_type, 0)) if isinstance(records, ParsedRecords) else 0
+    return [
+        _check(
+            check_id,
+            count >= baseline + 1,
+            "reader counts unknown event types without failing",
+            observed=count,
+            baseline=baseline,
+        )
+    ]
 
 
 def _fixture_paths(reader: ProviderReader, fixtures: Path | None) -> list[Path]:
@@ -260,6 +294,10 @@ def _stable_records(records: ParsedRecords) -> dict[str, Any]:
         data[key] = items
     data["malformed_line_count"] = records.malformed_line_count
     data["source_file_hash"] = records.source_file_hash
+    data["unknown_event_types"] = dict(records.unknown_event_types or {})
+    data["unrecognized_field_ratio"] = records.unrecognized_field_ratio
+    data["unrecognized_field_count"] = records.unrecognized_field_count
+    data["total_field_count"] = records.total_field_count
     return data
 
 

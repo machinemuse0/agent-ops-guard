@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from importlib import resources
 from pathlib import Path
 
 from aicg.cli import EXPORT_TABLES
@@ -19,8 +20,11 @@ def test_cli_help_contains_stable_command_surface():
         "dashboard",
         "alerts",
         "schedule",
+        "security",
         "review",
         "export",
+        "fixture",
+        "support",
         "doctor",
     ):
         assert command in result.stdout
@@ -77,8 +81,20 @@ def test_schema_required_keys_are_stable():
         "provider-capability.schema.json",
     }
     assert "overview" in schemas["daily-report.schema.json"]["required"]
+    assert "formatDrift" in schemas["daily-report.schema.json"]["required"]
     assert "trends" in schemas["dashboard-model.schema.json"]["required"]
     assert "origin" in schemas["provider-capability.schema.json"]["required"]
+
+
+def test_packaged_schema_resources_match_repo_schema_files():
+    repo_schema_dir = Path.cwd() / "schemas"
+    package_schema_dir = resources.files("aicg").joinpath("schemas")
+    repo_names = {path.name for path in repo_schema_dir.glob("*.schema.json")}
+    package_names = {path.name for path in package_schema_dir.iterdir() if path.name.endswith(".schema.json")}
+
+    assert package_names == repo_names
+    for name in repo_names:
+        assert package_schema_dir.joinpath(name).read_text(encoding="utf-8") == (repo_schema_dir / name).read_text(encoding="utf-8")
 
 
 def test_example_provider_documented_verify_command(tmp_path):

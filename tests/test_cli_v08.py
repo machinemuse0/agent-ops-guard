@@ -5,7 +5,11 @@ import sqlite3
 import subprocess
 import sys
 import datetime as dt
+from io import StringIO
 from pathlib import Path
+
+from aicg.cli import _flush_redacted_stdout_limit, _write_redacted_stdout
+from aicg.policy import load_policy
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -301,12 +305,14 @@ def test_redact_paths_covers_summary_export_and_dashboard(tmp_path):
     env = {**os.environ, "AICG_HOME": str(aicg_home)}
     base = [sys.executable, "-m", "aicg"]
     subprocess.run(base + ["init"], cwd=Path.cwd(), env=env, text=True, capture_output=True, check=True)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     with sqlite3.connect(aicg_home / "aicg.sqlite") as conn:
         conn.execute(
             """
             INSERT INTO sessions (id, provider, project_path, started_at, status, created_at)
-            VALUES ('s-redact', 'codex', '/Users/alice/private/project', '2026-07-07T00:00:00Z', 'completed', '2026-07-07T00:00:00Z')
-            """
+            VALUES ('s-redact', 'codex', '/Users/alice/private/project', ?, 'completed', ?)
+            """,
+            (now, now),
         )
         conn.commit()
 
@@ -346,6 +352,28 @@ def test_capture_redacts_secret_split_across_stdout_chunks(tmp_path):
     assert "[REDACTED]" in raw_text
 
 
+def test_capture_redacted_stdout_flushes_bounded_no_newline_buffer(tmp_path):
+    secret = "sk-" + "A" * 40
+    raw_handle = StringIO()
+    pending = "x" * 80 + secret + "y" * 80
+    policy = load_policy(tmp_path / "aicg")
+
+    pending = _flush_redacted_stdout_limit(
+        raw_handle,
+        pending,
+        policy,
+        max_chars=160,
+        overlap_chars=128,
+    )
+    _write_redacted_stdout(raw_handle, pending, policy)
+
+    text = raw_handle.getvalue()
+    assert len(pending) == 128
+    assert secret not in text
+    assert "[REDACTED]" in text
+    assert text.count('"stdout"') == 2
+
+
 def _single_value(db_path: Path, sql: str):
     with sqlite3.connect(db_path) as conn:
         return conn.execute(sql).fetchone()[0]
@@ -355,6 +383,7 @@ def _write_dummy_plugin(root: Path) -> None:
     (root / "dummy_plugin.py").write_text(
         '''
 import json
+from collections import Counter
 from pathlib import Path
 from aicg.models import NormalizedSession, NormalizedTurn, ParsedRecords
 from aicg.readers.base import Capabilities
@@ -372,6 +401,7 @@ class DummyReader:
         now = "2026-07-07T00:00:00Z"
         sessions = []
         turns = []
+        unknown_event_types = Counter()
         malformed = 0
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
@@ -379,13 +409,16 @@ class DummyReader:
             except json.JSONDecodeError:
                 malformed += 1
                 continue
+            if row.get("type") == "aicg.future_event":
+                unknown_event_types[str(row.get("type"))] += 1
+                continue
             row_id = str(row.get("id") or len(sessions) + 1)
             status = str(row.get("status") or "completed")
             session_id = stable_id("dummy-session", row_id)
             turn_id = stable_id("dummy-turn", row_id)
             sessions.append(NormalizedSession(id=session_id, provider=self.provider, project_path="/tmp/dummy", source_file=str(path), source_file_hash=source_hash, started_at=now, status=status, model="dummy-model", raw_event_count=1, malformed_line_count=malformed, created_at=utc_now_iso()))
             turns.append(NormalizedTurn(id=turn_id, session_id=session_id, provider=self.provider, source_file_hash=source_hash, started_at=now, status=status, model="dummy-model", input_uncached_tokens=int(row.get("tokens") or 0)))
-        return ParsedRecords(sessions=sessions, turns=turns, malformed_line_count=malformed, source_file=str(path), source_file_hash=source_hash)
+        return ParsedRecords(sessions=sessions, turns=turns, malformed_line_count=malformed, source_file=str(path), source_file_hash=source_hash, unknown_event_types=unknown_event_types)
 
     def capabilities(self):
         return Capabilities(token_usage=True, cache_semantics="none", tool_events=False, turn_status=True, session_resume=False, background_flag=False, native_cost=False)

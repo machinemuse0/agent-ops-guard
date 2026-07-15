@@ -69,7 +69,7 @@ def test_reporter_includes_required_sections(tmp_path):
     assert "Top expensive tasks" in report
     assert "Tool usage" in report
     assert "Recommended fixes" in report
-    assert report_model["schemaVersion"] == 3
+    assert report_model["schemaVersion"] == 4
     assert {
         "schemaVersion",
         "generatedAt",
@@ -86,6 +86,7 @@ def test_reporter_includes_required_sections(tmp_path):
         "wasteBreakdown",
         "efficiency",
         "gitActivity",
+        "formatDrift",
         "highRiskIssues",
         "recommendedFixes",
         "consistencyChecks",

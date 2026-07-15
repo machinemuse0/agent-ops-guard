@@ -1,8 +1,8 @@
 # AgentOps Guard Report Schema
 
-## Daily Report Schema v3
+## Daily Report Schema v4
 
-`summary` emits `schemaVersion = 3`.
+`summary` emits `schemaVersion = 4`.
 
 Major fields:
 
@@ -19,6 +19,8 @@ Major fields:
   attribution. Cost fields are `null` when no local or native pricing exists.
 - `efficiency`: cache efficiency and task P50/P95 token split signals.
 - `gitActivity`: local-only git activity synced from linked repositories.
+- `formatDrift`: format observation rows and warnings when unknown events may
+  make token statistics incomplete.
 - `period`: period metadata when `summary --period day|week|month` is used.
 - `compare`: delta against the previous period snapshot when `--compare` is
   used and a previous snapshot exists.
@@ -46,19 +48,20 @@ Cost is computed from the canonical buckets:
 - `cache_creation_input_tokens * cache_creation_input_per_mtok_usd`
 - `output_tokens * output_per_mtok_usd`
 
-`reasoning_output_per_mtok_usd` is deprecated because reasoning output is
-already included in `output_tokens`.
+`reasoning_output_per_mtok_usd` was removed in v0.9 because reasoning output is
+already included in `output_tokens`. `doctor --self-check` fails when local
+pricing files still contain that field.
 
 ## Review Schema v1
 
-`aicg review` emits `schemaVersion = 1` and `rulesetVersion = 1`.
+`aicg review` emits `schemaVersion = 1` and `rulesetVersion = 2`.
 
 Session review JSON uses:
 
 ```json
 {
   "schemaVersion": 1,
-  "rulesetVersion": 1,
+  "rulesetVersion": 2,
   "kind": "session",
   "session": {},
   "findings": [],
@@ -103,9 +106,9 @@ Major fields:
 file. It uses inline CSS and inline SVG only. It does not load external
 resources, start a server, or use a frontend dependency.
 
-## SQLite Schema v8
+## SQLite Schema v9
 
-Current SQLite schema version is `8`.
+Current SQLite schema version is `9`.
 
 `schema_meta` includes:
 
@@ -120,6 +123,10 @@ from producing linkable hashes while keeping hashes stable on the same machine.
 or rebuild. Historical hash values that cannot be recomputed exactly, such as
 older `alert_events.config_hash`, are HMAC-wrapped with the local salt.
 
+`format_observations` is a derived table populated during `scan`. It records
+unknown event types and top-level field drift by provider. `rebuild` can delete
+and recreate it from source logs.
+
 The supported migration path from older local databases is:
 
 ```bash
@@ -128,7 +135,9 @@ python -m aicg rebuild --since all
 
 ## JSON Schema Files
 
-`v0.8` ships lightweight local schema files under `schemas/*.schema.json`:
+`v0.9` ships lightweight local schema files as package data under
+`aicg/schemas/*.schema.json`. The repo keeps matching copies under
+`schemas/*.schema.json` for review and stability tests:
 
 - `daily-report.schema.json`
 - `dashboard-model.schema.json`
@@ -143,7 +152,8 @@ dependencies.
 ## Alerts Schema
 
 SQLite schema v7 added user-state table `alert_events` and nullable
-`report_snapshots.dashboard_model_json`; schema v8 retains both.
+`report_snapshots.dashboard_model_json`; schema v9 retains both and adds the
+derived `format_observations` table.
 
 `alert_events` stores only local threshold metadata:
 

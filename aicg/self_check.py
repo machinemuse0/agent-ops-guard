@@ -4,6 +4,7 @@ import sqlite3
 import tomllib
 import json
 import sys
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ from .config import app_paths
 from .db import CURRENT_SCHEMA_VERSION, REQUIRED_COLUMNS as DB_REQUIRED_COLUMNS
 from .dashboard import build_dashboard_model
 from .reporter import build_daily_report
-from .util import utc_now_iso
+from .util import SECRET_PATTERNS, SENSITIVE_PATH_PATTERNS, utc_now_iso
 
 
 REQUIRED_TABLES = {
@@ -32,6 +33,7 @@ REQUIRED_TABLES = {
     "git_links",
     "git_activity",
     "alert_events",
+    "format_observations",
 }
 
 
@@ -52,6 +54,7 @@ REQUIRED_INDEXES = {
     "idx_review_evidence_finding_id",
     "idx_git_activity_project_period",
     "idx_alert_events_period_created",
+    "idx_format_observations_provider",
 }
 
 
@@ -59,11 +62,13 @@ PRICE_FIELDS = {
     "input_per_mtok_usd",
     "cached_input_per_mtok_usd",
     "output_per_mtok_usd",
-    "reasoning_output_per_mtok_usd",
     "cache_creation_input_per_mtok_usd",
     "cache_read_input_per_mtok_usd",
     "credit_per_usd",
 }
+
+
+REMOVED_PRICE_FIELDS = {"reasoning_output_per_mtok_usd"}
 
 
 def run_self_check(app_dir: Path | None = None) -> dict[str, Any]:
@@ -90,10 +95,14 @@ def _check_config(path: Path) -> list[dict[str, Any]]:
     checks = [_check("config.parse", "pass", "config parses")]
     prices = data.get("prices") if isinstance(data.get("prices"), dict) else {}
     bad_fields = []
+    removed_fields = []
     for key, value in prices.items():
         if not isinstance(value, dict):
             bad_fields.append(f"{key}:not_table")
             continue
+        for field in REMOVED_PRICE_FIELDS:
+            if field in value:
+                removed_fields.append(f"{key}.{field}")
         for field in PRICE_FIELDS:
             if field in value and not _is_number(value[field]):
                 bad_fields.append(f"{key}.{field}")
@@ -108,6 +117,14 @@ def _check_config(path: Path) -> list[dict[str, Any]]:
         )
     else:
         checks.append(_check("config.prices_numeric", "pass", "price fields are numeric"))
+    checks.append(
+        _check(
+            "config.removed_price_fields",
+            "fail" if removed_fields else "pass",
+            "removed price fields absent" if not removed_fields else "removed price fields present",
+            fields=removed_fields,
+        )
+    )
     return checks
 
 
@@ -185,6 +202,7 @@ def _check_db(path: Path) -> list[dict[str, Any]]:
                     columns=sorted(raw_columns),
                 )
             )
+        checks.append(_check_bundle_no_raw_leak(conn, tables))
         checks.append(_check_report_consistency(conn, tables))
         checks.extend(_check_schema_files(conn))
     return checks
@@ -221,6 +239,49 @@ def _check_hash_salt(conn: sqlite3.Connection, tables: set[str]) -> dict[str, An
     )
 
 
+def _check_bundle_no_raw_leak(conn: sqlite3.Connection, tables: set[str]) -> dict[str, Any]:
+    if "format_observations" not in tables:
+        return _check("bundle.no_raw_leak", "fail", "format_observations missing")
+    sample = {
+        "formatObservations": [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT provider, observation_key, count, first_seen_at, last_seen_at
+                FROM format_observations
+                ORDER BY provider, observation_key
+                LIMIT 20
+                """
+            ).fetchall()
+        ],
+        "tableRows": {
+            row["name"]: 0
+            for row in conn.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+                """
+            ).fetchall()
+        },
+    }
+    text = json.dumps(sample, ensure_ascii=False, sort_keys=True)
+    leaks = []
+    if "hash_salt" in text:
+        leaks.append("hash_salt")
+    if any(pattern.search(text) for pattern in SECRET_PATTERNS):
+        leaks.append("secret")
+    if any(pattern.search(text) for pattern in SENSITIVE_PATH_PATTERNS):
+        leaks.append("sensitive_path")
+    return _check(
+        "bundle.no_raw_leak",
+        "fail" if leaks else "pass",
+        "support bundle metadata is raw-free" if not leaks else "support bundle metadata contains raw-sensitive values",
+        leaks=leaks,
+    )
+
+
 def _check_report_consistency(conn: sqlite3.Connection, tables: set[str]) -> dict[str, Any]:
     if not {"sessions", "turns", "tool_events", "issues", "issue_evidence", "scan_errors"} <= tables:
         return _check("report.consistency", "fail", "report consistency skipped because required tables are missing")
@@ -246,6 +307,7 @@ def _check_report_consistency(conn: sqlite3.Connection, tables: set[str]) -> dic
         "wasteBreakdown",
         "efficiency",
         "gitActivity",
+        "formatDrift",
         "highRiskIssues",
         "recommendedFixes",
         "consistencyChecks",
@@ -272,10 +334,14 @@ def _check_schema_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         "provider-capability.schema.json",
     }
     checks: list[dict[str, Any]] = []
-    if not root.exists():
+    if not root.is_dir():
         return [_check("schemas.exists", "fail", "schemas directory missing", path=str(root))]
-    present = {path.name for path in root.glob("*.schema.json")}
-    missing = sorted(expected - present)
+    schema_files = {
+        path.name: path
+        for path in root.iterdir()
+        if path.is_file() and path.name.endswith(".schema.json")
+    }
+    missing = sorted(expected - set(schema_files))
     checks.append(
         _check(
             "schemas.required_files",
@@ -285,8 +351,8 @@ def _check_schema_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         )
     )
     loaded: dict[str, dict[str, Any]] = {}
-    for name in sorted(expected & present):
-        path = root / name
+    for name in sorted(expected & set(schema_files)):
+        path = schema_files[name]
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -309,16 +375,27 @@ def _check_schema_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return checks
 
 
-def _schema_root() -> Path:
-    candidates = [
-        Path(__file__).resolve().parents[1] / "schemas",
-        Path(sys.prefix) / "schemas",
-        Path(sys.base_prefix) / "schemas",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
+def _schema_root() -> Any:
+    for candidate in _schema_roots():
+        if candidate.is_dir():
             return candidate
-    return candidates[0]
+    return _schema_roots()[0]
+
+
+def _schema_roots() -> list[Any]:
+    candidates: list[Any] = []
+    try:
+        candidates.append(resources.files("aicg").joinpath("schemas"))
+    except (ModuleNotFoundError, AttributeError):
+        pass
+    candidates.extend(
+        [
+            Path(__file__).resolve().parents[1] / "schemas",
+            Path(sys.prefix) / "schemas",
+            Path(sys.base_prefix) / "schemas",
+        ]
+    )
+    return candidates
 
 
 def _check_required_keys(check_id: str, model: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:

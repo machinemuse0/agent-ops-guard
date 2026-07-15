@@ -34,7 +34,14 @@ def test_init_db_migrates_v011_database_to_schema_v2(tmp_path):
         assert count_rows(conn, "alert_events") == 0
         assert {"source_line_start", "source_line_end"} <= session_columns
         assert {"source_file_hash", "source_line_start", "source_line_end"} <= turn_columns
-        assert {"source_file_hash", "source_line_start", "source_line_end"} <= tool_columns
+        assert {
+            "source_file_hash",
+            "source_line_start",
+            "source_line_end",
+            "security_flags",
+            "security_detail",
+            "command_hash",
+        } <= tool_columns
         assert {
             "issue_id",
             "source_file_hash",

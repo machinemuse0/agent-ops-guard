@@ -8,7 +8,29 @@ AgentOps Guard 是一个 local-first 的 AI coding agent 使用诊断与成本�
 python -m aicg
 ```
 
-当前版本是 `v0.8`。这个阶段的重点不是云端商业化，也不是接管账单系统，而是把本机日志变成可信、可迁移、可复核、不会泄露 raw prompt/code/output 的本地报告、review 诊断、dashboard、provider 插件接口和 metadata 数据层。
+当前版本是 `v0.9` release prep。这个阶段的重点不是云端商业化，也不是接管账单系统，而是把本机日志变成可信、可迁移、可复核、不会泄露 raw prompt/code/output 的本地报告、review 诊断、dashboard、provider 插件接口、格式漂移观测和 metadata 数据层，并补齐 `v1.0` 的稳定契约与发布闸门。
+
+## Install And First Check
+
+AgentOps Guard 需要 Python 3.11+。如果你在源码目录里试用，可以直接运行 `python -m aicg`；如果要从任意目录使用，先安装到当前 Python 环境：
+
+```bash
+python -m pip install .
+python -m aicg --version
+```
+
+建议首次使用先用独立目录验证，不影响已有 `~/.aicg`：
+
+```bash
+AICG_HOME=/tmp/aicg-demo python -m aicg init
+AICG_HOME=/tmp/aicg-demo python -m aicg doctor --self-check --json
+```
+
+默认日志位置是 `~/.codex` 和 `~/.claude`。如果你使用了自定义目录，可以在运行 `scan` 前设置：
+
+```bash
+CODEX_HOME=/path/to/codex-home CLAUDE_CONFIG_DIR=/path/to/claude-config python -m aicg scan --since 24h
+```
 
 ## Why
 
@@ -24,7 +46,7 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 
 ## Current Capabilities
 
-`v0.8` 已实现：
+`v0.9` 已实现：
 
 - `python -m aicg init`
 - `python -m aicg capture codex -- ...`
@@ -39,11 +61,12 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 - `python -m aicg summary --period week --compare --out weekly.md`
 - `python -m aicg dashboard --period day --out ~/.aicg/reports/dashboard.html`
 - `python -m aicg alerts check --period day`
-- `python -m aicg schedule print --scheduler cron|launchd|systemd --time 09:00`
-- `python -m aicg review --session <session_id> --format md|json`
+- `python -m aicg schedule print --scheduler cron --time 09:00`
+- `python -m aicg review --session <session_id> --format md`
 - `python -m aicg review --last`
 - `python -m aicg review --since 24h --top 5`
 - `python -m aicg review --project <path> --since 7d`
+- `python -m aicg security audit --since 24h --out security.md`
 - `python -m aicg policy check --since 24h --fail-on violation`
 - `python -m aicg policy rules`
 - `python -m aicg policy ack <finding_id> --reason "approved"`
@@ -54,10 +77,12 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 - `python -m aicg doctor --online --json`
 - `python -m aicg doctor --deep --max-files 500`
 - `python -m aicg doctor --self-check --json`
-- `python -m aicg inspect session <session_id> --format md|json`
-- `python -m aicg inspect source <source_file_hash> --format md|json`
-- `python -m aicg export --kind sessions|turns|tool-events|issues|scan-errors --format json|csv --out <path>`
+- `python -m aicg inspect session <session_id> --format json`
+- `python -m aicg inspect source <source_file_hash> --format json`
+- `python -m aicg export --kind sessions --format json --out sessions.json`
 - `python -m aicg export --kind sessions --format json --redact-paths --out sessions.json`
+- `python -m aicg fixture redact input.jsonl --out fixture.jsonl`
+- `python -m aicg support bundle --out bundle.json`
 
 当前 reader 支持：
 
@@ -73,6 +98,7 @@ AgentOps Guard 的第一性原则是：默认离线、只读、可解释、可�
 - `RETRY_LOOP`
 - `BACKGROUND_CONSUMPTION`
 - `MODEL_SWITCH_ANOMALY`
+- `LOW_CACHE_HIT`
 - `TOOL_OUTPUT_BLOAT`
 - `MCP_OVERUSE`
 - `RAW_PAYLOAD_RISK`
@@ -109,8 +135,8 @@ Review evidence 会进入 `review_evidence`，只保存 source hash、line range
 ~/.aicg/
   config.toml
   aicg.sqlite
-  raw/codex/
-  raw/claude/
+  raw/codex/      # legacy/imported Codex JSONL
+  raw/claude/     # reserved local staging; built-in Claude reader scans ~/.claude/projects
   reports/
   policy.toml
 ```
@@ -134,6 +160,8 @@ python -m aicg init
 ```bash
 python -m aicg scan --since 24h --provider all
 ```
+
+如果输出 `files scanned: 0`，通常表示这个时间窗口内没有可读的新日志，或者本机使用了自定义 `CODEX_HOME` / `CLAUDE_CONFIG_DIR`。这不是初始化失败；可以先跑 `python -m aicg doctor --json` 看本机路径识别结果。
 
 扫描来源包括：
 
@@ -219,6 +247,13 @@ python -m aicg rebuild --since all
 python -m aicg policy check --since 24h --fail-on violation
 ```
 
+输出本地 agent 命令安全审计报告：
+
+```bash
+python -m aicg security audit --since 24h --format md --out ~/.aicg/reports/security.md --fail-on high
+python -m aicg security audit --since 24h --format json --out ~/.aicg/reports/security.json --fail-on none
+```
+
 运行默认离线诊断：
 
 ```bash
@@ -300,9 +335,22 @@ interrupted_sessions_max = 3
 
 `python -m aicg schedule print` 只向 stdout 打印 cron/launchd/systemd 配置文本，不写 `crontab`、`~/Library/LaunchAgents` 或 systemd 目录。生成的命令使用当前 Python 解释器运行 `-m aicg`，并在当前环境存在 `AICG_HOME` 时保留该值。
 
-## v0.8 Stability And Plugins
+## v0.8-v0.9 Stability, Plugins, And Support
 
 `v0.8` 引入 schema v8：`schema_meta.hash_salt` 在 `init` 时生成，所有日志/报表派生 hash 使用本机 salt 做 HMAC-SHA256。同一份日志在两台机器上不会产生可关联 hash；同一机器 rebuild 后 hash 稳定。旧 DB 需要 `python -m aicg rebuild --since all`。
+
+`v0.9` 引入 schema v9：`format_observations` 记录 reader 看到的未知事件类型和顶层字段漂移。`scan` 会打印 `format drift: ...` 摘要，`doctor` 展示 Format drift 小节，日报在未知事件比例超过默认 5% 时提示 token 统计可能不完整。
+
+`v0.9` release prep 进一步引入 schema v10：`tool_events` 增加 `security_flags`、`security_detail` 和 `command_hash`，用于 `security audit` 的 no-raw 命令风险报告。
+
+冻结前新增两个本地支持命令：
+
+```bash
+python -m aicg fixture redact input.jsonl --out fixture.jsonl --keep-structure
+python -m aicg support bundle --out bundle.json
+```
+
+`fixture redact` 用于把真实 JSONL 脱敏成可贡献 fixture；`support bundle` 只生成本地 JSON 文件，不上传、不联网，生成后会提示人工检查再手动分享。
 
 Provider 插件通过 `aicg.providers` entry point 暴露 `ProviderReader`。第三方插件默认必须先通过：
 
@@ -318,27 +366,41 @@ python -m aicg providers verify <module_or_package> --fixtures <fixtures_dir>
 - `docs/provider-plugin-guide.md`
 - `docs/migration-guide.md`
 - `docs/threat-model.md`
-- `schemas/*.schema.json`
+- `SECURITY.md`
+- `CONTRIBUTING.md`
+- `docs/accuracy-audit.md`
+- `docs/release-checklist-1.0.md`
+- `docs/adr/`
+- `aicg/schemas/*.schema.json`（repo 根目录保留匹配的 `schemas/*.schema.json` 便于 review）
+
+`v1.0` release readiness 是本地可检查的：
+
+```bash
+python scripts/check_release_ready.py
+python scripts/check_release_ready.py --target 1.0.0
+```
+
+在 30 天 accuracy audit、外部 beta 和 P0/P1 bug bar 完成前，`--target
+1.0.0` 必须显示 `blocked`，不能被误判成 ready。
 
 ## Local Pricing
 
 成本估算必须来自本地显式价格表。AgentOps Guard 不抓 billing 页面，也不根据模型名猜价格。
 
-lookup key 必须精确匹配 `provider:model`：
+运行 `python -m aicg init` 后，在 `~/.aicg/config.toml` 里添加价格表。lookup key 必须精确匹配 `provider:model`：
 
 ```toml
 [prices."codex:gpt-5.5"]
 input_per_mtok_usd = 0
 cached_input_per_mtok_usd = 0
 output_per_mtok_usd = 0
-reasoning_output_per_mtok_usd = 0
 cache_creation_input_per_mtok_usd = 0
 cache_read_input_per_mtok_usd = 0
 credit_per_usd = 1
 ```
 
-`reasoning_output_per_mtok_usd` 已废弃。`reasoning_output_tokens` 是
-`output_tokens` 的子集，不参与 total，也不单独计价。
+`reasoning_output_per_mtok_usd` 已在 v0.9 移除。`reasoning_output_tokens`
+是 `output_tokens` 的子集，不参与 total，也不单独计价；self-check 会拒绝仍包含该字段的价格表。
 
 无匹配价格时，`estimated_cost_usd` 和 `credit_estimate` 保持 unavailable。
 
@@ -370,7 +432,7 @@ Provider token 语义按来源处理，避免重复计算：
 
 `doctor --deep` 会递归扫描大目录，但仍受 `--max-files` 限制。报告会输出 `mode.offline`、`mode.deep`、`limits.maxFiles` 和 `scanCapReached`，方便解释诊断覆盖范围。
 
-`doctor --self-check` 会验证 DB schema version、required tables/columns/indexes、config parse、price table numeric fields、report JSON consistency、overview counts，以及 `scan_errors`、`review_evidence` 是否只保存 hash/指针。
+`doctor --self-check` 会验证 DB schema version、required tables/columns/indexes、config parse、price table numeric fields、包内 JSON schema 文件、report JSON consistency、overview counts，以及 `scan_errors`、`review_evidence` 是否只保存 hash/指针。
 
 Doctor 永远不自动删除缓存、不修改 Codex/Claude 配置、不重建 state DB。
 
@@ -384,16 +446,22 @@ aicg/
   config.py
   db.py
   alerts.py
+  analyzer.py
+  conformance.py
   dashboard.py
   doctor.py
-  analyzer.py
+  fixture_redact.py
+  policy.py
   pricing.py
   reporter.py
   schedule.py
   self_check.py
+  support.py
+  schemas/
   readers/
     codex_jsonl.py
     claude_jsonl.py
+  review/
 tests/
   fixtures/
 ```
@@ -418,159 +486,30 @@ local JSONL logs
 - Pricing 只使用本地 config，不做网络请求。
 - Doctor 只读，默认 offline，所有大目录扫描都必须有边界。
 
-## Long-Term Roadmap
+## Roadmap And Release Contracts
 
-### Phase 0: Trustworthy local core
+历史阶段和设计推导保存在：
 
-状态：完成，对应 `v0.1.1`。
+- `docs/spec-v0.3-v0.5.md`
+- `docs/spec-v0.6-v0.8.md`
+- `docs/spec-v0.9-v1.0.md`
 
-目标：
+`v1.0` 不再是新功能里程碑，而是稳定契约的签署：
 
-- Codex + Claude Code local logs
-- SQLite schema
-- idempotent scan
-- file-level parser resilience
-- offline bounded doctor
-- Markdown daily summary
-- privacy/policy flags
-- local exact-match pricing
-- regression tests for reader, reporter, doctor, pricing and scan resilience
+- CLI/Data/Plugin semver 语义：`docs/stability.md`
+- 安全响应政策：`SECURITY.md`
+- 贡献与 fixture 准入：`CONTRIBUTING.md`
+- 30 天成本准确性审计：`docs/accuracy-audit.md`
+- 发布清单与 release notes 草稿：`docs/release-checklist-1.0.md`、`docs/release-notes-1.0.md`
+- 关键架构决策：`docs/adr/`
 
-下一步重点是继续扩充真实日志 fixtures，让统计结果在更多边缘格式下保持可信。
+1.x 主题种子只作为候选池，不代表承诺顺序：
 
-### Phase 1: Schema and evidence hardening
-
-目标版本：`v0.2`
-
-状态：完成。
-
-计划：
-
-- 增加 schema versioning 和 migration tests。
-- 固化 `daily_report` JSON schema，Markdown 从 JSON schema 渲染。
-- 为每个 issue 增加 evidence pointer，但仍不保存 raw payload。
-- 增加 `aicg inspect session <id>`，只展示 metadata 和 hashed evidence。
-- 增加 `aicg export --format json|csv`。
-- 增加更多 malformed JSONL、partial transcript、missing fields、rotated logs fixtures。
-- 增加 `aicg doctor --self-check`，验证 DB schema、config 和 report consistency。
-
-成功标准：
-
-- 任何坏日志都不能阻塞日报。
-- Overview、project ranking、issue counts 可由 SQLite 查询复核。
-- SQLite schema 可从旧版本平滑迁移。
-
-### Phase 2: Provider abstraction
-
-目标版本：`v0.3`
-
-计划：
-
-- 抽象 provider registry。
-- 支持 Cursor/Zed/OpenCode 日志 reader。
-- 支持 OpenRouter/local model usage import，但不做云端 API 拉取。
-- 支持本地 Qwen/DeepSeek/Kimi/Ollama style logs。
-- 增加 provider-specific capabilities matrix。
-- 增加 `aicg scan --provider codex|claude|all`。
-
-成功标准：
-
-- 新 provider 只需要实现 reader contract。
-- 不同 provider 的 token、model、tool、status 语义能映射到统一 schema。
-- 未识别字段不会破坏现有 provider。
-
-### Phase 3: Policy and privacy guard
-
-目标版本：`v0.4`
-
-计划：
-
-- 增加 `policy.toml`。
-- 支持 restricted service allowlist/denylist。
-- 支持 sensitive path rules。
-- 支持 secret pattern rules。
-- 支持 per-project policy overrides。
-- 增加 `aicg policy check --since 24h`。
-- 增加 privacy risk trend section。
-- 增加 raw payload risk classifier 的阈值配置。
-
-成功标准：
-
-- 用户可以把“哪些服务不能被 agent 调用”“哪些路径不能进入日志”写成可审计规则。
-- 报告可以区分 warning、violation 和 needs review。
-- 仍然不保存 raw sensitive data。
-
-### Phase 4: Cost and productivity analytics
-
-目标版本：`v0.5`
-
-计划：
-
-- 增加 weekly/monthly reports。
-- 增加 per-project cost trend。
-- 增加 failed cost 和 retry cost。
-- 增加 model switch/fallback trend。
-- 增加 estimated cost per successful task。
-- 预留 `accepted_lines`、`merged_pr_count`、`human_review_time` 字段。
-- 支持 Git metadata optional import，用于估算 `estimated_cost_per_merged_pr`。
-
-成功标准：
-
-- 用户能看到“哪个项目最烧 token”“哪个模型最容易失败”“哪类任务最适合拆分”。
-- cost 不再只是总量，而能解释浪费来自哪里。
-
-### Phase 5: Review module
-
-目标版本：`v0.6`
-
-状态：已实现。
-
-- 增加 `review` module。
-- 分析任务是否存在 repeated failure、tool output bloat、context overload、missing setup。
-- 增加 `aicg review --session <id>`、`--last`、`--since --top`、`--project`。
-- 输出“下次运行前建议”。
-- 支持把高风险 session 导出成 issue template。
-
-成功标准：
-
-- 工具不仅告诉用户“花了多少”，还能告诉用户“为什么失败”和“下一次怎么降低失败概率”。
-
-### Phase 6: Local dashboard and automation
-
-目标版本：`v0.7`
-
-状态：已实现。
-
-- 增加 local-only static HTML dashboard。
-- 增加 trend charts。
-- 增加 `aicg summary --format md|json|html`。
-- 增加 cron/launchd/systemd 示例。
-- 增加 alert thresholds，但只输出本地文件或 terminal summary。
-
-成功标准：
-
-- 用户不用打开 SQLite，也能查看趋势。
-- 自动日报不需要云服务。
-
-### Phase 7: Public package and stable API
-
-目标版本：`v1.0`
-
-计划：
-
-- 发布 pip package。
-- 稳定 CLI flags。
-- 稳定 normalized event schema。
-- 稳定 report JSON schema。
-- 提供 provider plugin guide。
-- 提供 example configs。
-- 提供 threat model 文档。
-- 提供 migration guide。
-
-成功标准：
-
-- 用户可以放心把它放进自己的本地 agent 工作流。
-- 第三方可以贡献 provider reader，而不用理解全部内部实现。
+- 新 provider reader 继续走 fixture 准入制，多数应以第三方插件形态存在。
+- 报表 i18n。
+- policy 规则包。
+- dashboard drill-down。
+- `accepted_lines` / `human_review_time` 的本地可测来源探索。
 
 ## Non-Goals
 

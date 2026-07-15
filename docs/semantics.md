@@ -21,6 +21,11 @@ Provider mapping:
   input maps to `cache_read_input_tokens`.
 - Claude logs: raw `input_tokens` is already uncached input, so it maps directly
   to `input_uncached_tokens`.
+- Claude side events: `attachment`, `ai-title`, `last-prompt`, and `summary`
+  are known transcript events. Events without `usage` are treated as
+  non-billing metadata. If a known side event carries provider `usage`, AgentOps
+  Guard records a usage-only turn and marks it with
+  `CLAUDE_SIDE_EVENT_USAGE` so the accuracy audit can attribute the source.
 - Codex `token_count`: `last_token_usage` is accepted directly. When only
   cumulative `total_token_usage` exists, AgentOps Guard diffs it against the
   previous cumulative value. If no previous value exists, that turn is recorded
@@ -59,6 +64,27 @@ Policy severity is tied to surface:
 - `output`: tool output, can produce `warning`.
 - `mention`: assistant/user text mention, can produce `needs_review` only when
   mention scanning is enabled.
+
+## Security Audit
+
+`aicg security audit` scans local agent command metadata derived during provider
+log parsing. It is not an endpoint protection, filesystem scanner, or package
+vulnerability scanner.
+
+The reader may inspect raw provider payloads in memory while scanning, but it
+stores only no-raw derived fields on `tool_events`: `security_flags`,
+`security_detail`, and `command_hash`. Reports use rule ids, source hashes,
+line ranges, metric key/value pairs, and command hashes. They do not include
+raw command text, complete URLs, query strings, secrets, or sensitive path
+values.
+
+Initial security audit codes:
+
+- `SENSITIVE_COMMAND`
+- `DANGEROUS_FLAG`
+- `CREDENTIAL_ACCESS`
+- `DOWNLOAD_TOOL`
+- `STARTUP_PERSISTENCE`
 
 ## Review Diagnostics
 

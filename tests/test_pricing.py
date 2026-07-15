@@ -32,7 +32,6 @@ def test_pricing_applies_exact_provider_model_match(tmp_path):
                 "input_per_mtok_usd": 1,
                 "cached_input_per_mtok_usd": 0,
                 "output_per_mtok_usd": 2,
-                "reasoning_output_per_mtok_usd": 0,
                 "cache_creation_input_per_mtok_usd": 0,
                 "cache_read_input_per_mtok_usd": 0,
                 "credit_per_usd": 3,
@@ -63,7 +62,6 @@ def test_codex_pricing_does_not_double_count_cached_or_reasoning_tokens(tmp_path
                 "input_per_mtok_usd": 1,
                 "cached_input_per_mtok_usd": 0.1,
                 "output_per_mtok_usd": 2,
-                "reasoning_output_per_mtok_usd": 0,
                 "credit_per_usd": 1,
             }
         }

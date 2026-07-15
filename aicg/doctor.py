@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import app_paths, load_config
-from .db import init_db
+from .db import connect, init_db
 from .readers import default_registry
 from .self_check import run_self_check
 from .util import sha256_text, utc_now_iso
@@ -92,6 +92,7 @@ def collect_doctor_report(
         "aicg": _aicg_paths(paths),
         "providers": provider_rows,
         "providerLoadErrors": provider_load_errors,
+        "formatDrift": _format_drift_info(paths),
         "configError": config_error,
         "dbError": db_error,
         "codex": _codex_info(codex_home, online=online, max_files=bounded_max_files),
@@ -142,6 +143,16 @@ def format_doctor_markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"- load error: {error.get('entryPoint') or error.get('module')} ({error.get('errorType')}: {error.get('message')})"
         )
+
+    lines.extend(["", "## Format drift"])
+    drift_items = report.get("formatDrift", {}).get("observations", [])
+    if drift_items:
+        for item in drift_items:
+            lines.append(
+                f"- {item['provider']} {item['observationKey']}: count={item['count']}, first={item['firstSeenAt']}, last={item['lastSeenAt']}"
+            )
+    else:
+        lines.append("- none recorded")
 
     codex = report["codex"]
     lines.extend(
@@ -277,7 +288,35 @@ def _load_provider_verifications(paths: dict[str, Path]) -> dict[str, object]:
         return data
     if isinstance(data, list):
         return {"formatVersion": 1, "verified": [str(item) for item in data if item]}
-    return {"formatVersion": 2, "records": []}
+        return {"formatVersion": 2, "records": []}
+
+
+def _format_drift_info(paths: dict[str, Path]) -> dict[str, Any]:
+    if not paths["db"].exists():
+        return {"observations": []}
+    try:
+        with connect(paths["db"]) as conn:
+            rows = conn.execute(
+                """
+                SELECT provider, observation_key, count, first_seen_at, last_seen_at
+                FROM format_observations
+                ORDER BY provider, observation_key
+                """
+            ).fetchall()
+    except Exception:
+        return {"observations": []}
+    return {
+        "observations": [
+            {
+                "provider": row["provider"],
+                "observationKey": row["observation_key"],
+                "count": int(row["count"] or 0),
+                "firstSeenAt": row["first_seen_at"],
+                "lastSeenAt": row["last_seen_at"],
+            }
+            for row in rows
+        ]
+    }
 
 
 def _codex_info(codex_home: Path, *, online: bool, max_files: int) -> dict[str, Any]:

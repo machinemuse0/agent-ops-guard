@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 
 
@@ -86,6 +87,9 @@ class NormalizedToolEvent:
     output_bytes: int = 0
     exit_code: int | None = None
     call_target: str | None = None
+    security_flags: str | None = None
+    security_detail: str | None = None
+    command_hash: str | None = None
 
 
 @dataclass
@@ -182,3 +186,7 @@ class ParsedRecords:
     malformed_line_count: int = 0
     source_file: str | None = None
     source_file_hash: str | None = None
+    unknown_event_types: Counter[str] = field(default_factory=Counter)
+    unrecognized_field_ratio: float = 0.0
+    unrecognized_field_count: int = 0
+    total_field_count: int = 0

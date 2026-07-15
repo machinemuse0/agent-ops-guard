@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from .base import Capabilities
 from ..policy import EffectivePolicy, load_policy, sensitive_policy_findings, sensitive_policy_flags
+from ..security_audit import derive_security_tool_metadata
 from ..models import (
     PolicyFinding,
     NormalizedSession,
@@ -37,6 +39,55 @@ TOKEN_FIELDS = (
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
 )
+
+
+KNOWN_EVENT_TYPES = {
+    "assistant",
+    "ai-title",
+    "attachment",
+    "last-prompt",
+    "user",
+    "summary",
+    "system",
+    "queue-operation",
+}
+
+
+KNOWN_ROLES = {"assistant", "user", "system"}
+
+
+KNOWN_TOP_LEVEL_FIELDS = {
+    "type",
+    "uuid",
+    "parentUuid",
+    "sessionId",
+    "session_id",
+    "cwd",
+    "timestamp",
+    "created_at",
+    "time",
+    "message",
+    "isSidechain",
+    "userType",
+    "version",
+    "gitBranch",
+    "requestId",
+    "toolUseID",
+    "entrypoint",
+    "permissionMode",
+    "model",
+    "role",
+    "summary",
+    "title",
+    "content",
+    "prompt",
+    "lastPrompt",
+    "attachment",
+    "attachments",
+    "usage",
+    "tokenUsage",
+    "token_usage",
+}
 
 
 class ClaudeJsonlReader:
@@ -73,6 +124,9 @@ class ClaudeJsonlReader:
         tool_by_raw_id: dict[str, NormalizedToolEvent] = {}
         raw_event_count = 0
         malformed_line_count = 0
+        unknown_event_types: Counter[str] = Counter()
+        unrecognized_field_count = 0
+        total_field_count = 0
         current_line_number = 0
         first_seen_at: str | None = None
         last_seen_at: str | None = None
@@ -83,7 +137,10 @@ class ClaudeJsonlReader:
         def ensure_session(event: dict[str, Any] | None = None) -> NormalizedSession:
             nonlocal session, session_used_source_hash
             event = event or {}
-            raw_session_id = _first_str(event, "sessionId", "session_id")
+            root_session_id = _first_str(event, "sessionId", "session_id")
+            agent_id = _first_str(event, "agentId") if _is_sidechain(event) else None
+            raw_session_id = agent_id or root_session_id
+            parent_session_id = root_session_id if agent_id and root_session_id != agent_id else None
             if session is not None:
                 if raw_session_id and session_used_source_hash:
                     _rekey_session(
@@ -93,8 +150,12 @@ class ClaudeJsonlReader:
                         stable_id("session", self.provider, raw_session_id),
                     )
                     session.native_session_id = raw_session_id
-                    session.lineage_id = raw_session_id
+                    session.lineage_id = root_session_id or raw_session_id
+                    session.parent_session_id = parent_session_id
                     session_used_source_hash = False
+                if parent_session_id:
+                    session.parent_session_id = parent_session_id
+                    session.lineage_id = root_session_id or parent_session_id
                 session.project_path = _first_str(event, "cwd") or session.project_path
                 session.source_line_start = session.source_line_start or current_line_number
                 session.source_line_end = current_line_number or session.source_line_end
@@ -112,7 +173,8 @@ class ClaudeJsonlReader:
                 id=session_id,
                 provider=self.provider,
                 native_session_id=raw_session_id,
-                lineage_id=raw_session_id or source_identity_hash,
+                lineage_id=root_session_id or raw_session_id or source_identity_hash,
+                parent_session_id=parent_session_id,
                 project_path=_first_str(event, "cwd") or _project_from_path(source),
                 source_file=str(source),
                 source_file_hash=source_hash,
@@ -144,6 +206,13 @@ class ClaudeJsonlReader:
                     continue
 
                 raw_event_count += 1
+                event_type = _first_str(event, "type")
+                message = event.get("message") if isinstance(event.get("message"), dict) else {}
+                role = _first_str(message, "role")
+                unknown_event_types.update(_unknown_event_type_labels(event_type, role))
+                unknown_fields, total_fields = _top_level_field_drift(event, KNOWN_TOP_LEVEL_FIELDS)
+                unrecognized_field_count += unknown_fields
+                total_field_count += total_fields
                 event_time = _timestamp(event)
                 if event_time and first_seen_at is None:
                     first_seen_at = event_time
@@ -154,10 +223,6 @@ class ClaudeJsonlReader:
                 privacy_flags, policy_flags = _event_flags(event, self.policy)
                 session_privacy_flags.update(privacy_flags)
                 session_policy_flags.update(policy_flags)
-
-                event_type = _first_str(event, "type")
-                message = event.get("message") if isinstance(event.get("message"), dict) else {}
-                role = _first_str(message, "role")
 
                 if event_type == "assistant" or role == "assistant":
                     raw_message_id = _first_str(message, "id") or _first_str(event, "uuid")
@@ -232,6 +297,36 @@ class ClaudeJsonlReader:
                     )
                     continue
 
+                side_event_usage = _usage_from_event(event)
+                if side_event_usage is not None:
+                    raw_message_id = (
+                        _first_str(message, "id")
+                        or _first_str(event, "uuid", "requestId", "toolUseID")
+                        or f"{source_identity_hash}:{current_line_number}"
+                    )
+                    native_turn_key = f"{self.provider}:{event_type or 'event'}:{raw_message_id}"
+                    turn = NormalizedTurn(
+                        id=stable_id("turn", self.provider, native_turn_key),
+                        session_id=active_session.id,
+                        provider=self.provider,
+                        native_turn_key=native_turn_key,
+                        source_file_hash=source_hash,
+                        source_line_start=current_line_number,
+                        source_line_end=current_line_number,
+                        started_at=event_time,
+                        ended_at=event_time,
+                        status="completed",
+                        model=_message_model(event) or active_session.model,
+                        task_type=_task_type(event) or active_session.task_type,
+                        background_flag=active_session.background_flag or _is_sidechain(event),
+                    )
+                    _apply_usage_values(turn, side_event_usage)
+                    _add_turn_token_flag(turn, "CLAUDE_SIDE_EVENT_USAGE")
+                    _merge_turn_flags(turn, privacy_flags, policy_flags)
+                    turns.append(turn)
+                    active_session.model = turn.model or active_session.model
+                    continue
+
                 if event_type in {"system", "queue-operation"} and _looks_failed(event):
                     active_session.status = "failed"
 
@@ -268,7 +363,27 @@ class ClaudeJsonlReader:
             malformed_line_count=malformed_line_count,
             source_file=str(source),
             source_file_hash=source_hash,
+            unknown_event_types=unknown_event_types,
+            unrecognized_field_ratio=(unrecognized_field_count / total_field_count) if total_field_count else 0.0,
+            unrecognized_field_count=unrecognized_field_count,
+            total_field_count=total_field_count,
         )
+
+
+def _unknown_event_type_labels(event_type: str | None, role: str | None) -> list[str]:
+    if event_type in KNOWN_EVENT_TYPES or role in KNOWN_ROLES:
+        return []
+    if event_type:
+        return [event_type]
+    if role:
+        return [f"role:{role}"]
+    return ["<missing>"]
+
+
+def _top_level_field_drift(event: dict[str, Any], known_fields: set[str]) -> tuple[int, int]:
+    total = len(event)
+    unknown = sum(1 for key in event if key not in known_fields)
+    return unknown, total
 
 
 def _timestamp(event: dict[str, Any]) -> str | None:
@@ -342,11 +457,36 @@ def _apply_usage(turn: NormalizedTurn, message: dict[str, Any]) -> None:
     usage = message.get("usage")
     if not isinstance(usage, dict):
         return
+    _apply_usage_values(turn, usage)
+
+
+def _apply_usage_values(turn: NormalizedTurn, usage: dict[str, Any]) -> None:
     for field in TOKEN_FIELDS:
         parsed = _int_or_none(usage.get(field))
         if parsed is not None:
             setattr(turn, field, parsed)
     turn.input_uncached_tokens = turn.input_tokens
+
+
+def _usage_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    for candidate in (
+        message.get("usage"),
+        event.get("usage"),
+        event.get("tokenUsage"),
+        event.get("token_usage"),
+    ):
+        if not isinstance(candidate, dict):
+            continue
+        if any(_int_or_none(candidate.get(field)) is not None for field in TOKEN_FIELDS):
+            return candidate
+    return None
+
+
+def _add_turn_token_flag(turn: NormalizedTurn, flag: str) -> None:
+    existing = set(turn.token_flags.split(",")) if turn.token_flags else set()
+    existing.add(flag)
+    turn.token_flags = flags_to_text(existing)
 
 
 def _collect_tool_use(
@@ -367,6 +507,7 @@ def _collect_tool_use(
         if item.get("type") != "tool_use":
             continue
         raw_tool_id = _first_str(item, "id")
+        security_metadata = derive_security_tool_metadata(item.get("input"))
         session_privacy_flags.update(detect_privacy_flags(item.get("input")))
         custom_privacy, custom_policy = sensitive_policy_flags(policy, item.get("input"))
         session_privacy_flags.update(custom_privacy)
@@ -390,6 +531,9 @@ def _collect_tool_use(
             output_bytes=0,
             exit_code=None,
             call_target=call_targets_to_text(extract_call_targets(item.get("input"))),
+            security_flags=security_metadata.get("security_flags"),
+            security_detail=security_metadata.get("security_detail"),
+            command_hash=security_metadata.get("command_hash"),
         )
         if raw_tool_id and raw_tool_id in tool_by_raw_id:
             existing = tool_by_raw_id[raw_tool_id]
@@ -401,6 +545,9 @@ def _collect_tool_use(
             existing.source_line_start = existing.source_line_start or source_line
             existing.source_line_end = source_line
             existing.call_target = existing.call_target or call_targets_to_text(extract_call_targets(item.get("input")))
+            existing.security_flags = existing.security_flags or security_metadata.get("security_flags")
+            existing.security_detail = existing.security_detail or security_metadata.get("security_detail")
+            existing.command_hash = existing.command_hash or security_metadata.get("command_hash")
             tool = existing
         else:
             tool_events.append(tool)
