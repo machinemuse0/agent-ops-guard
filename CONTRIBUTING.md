@@ -62,6 +62,35 @@ New readers should usually start as third-party plugins. A built-in reader needs
 Use `--allow-unverified` only for local development. It is intentionally
 experimental and should not appear in automated team workflows.
 
+## Dual-Agent Workflow
+
+For every non-trivial change, create a versioned task before editing:
+
+```bash
+aiwf-new-task <slug> <type> <R0|R1|R2|R3>
+aiwf-task-state TASK-YYYYMMDD-slug TRIAGED --actor human
+```
+
+The task directory under `.ai/tasks/` is the source of truth for scope,
+acceptance criteria, plan, implementation evidence, review, and current state.
+Advance state only with `aiwf-task-state`; do not treat chat history as approval.
+
+Each task has one Writer in one branch/worktree. The independent Reviewer must
+use the other vendor in a fresh, read-only context. A Writer self-check is useful
+but does not replace cross-vendor review.
+
+Use the repository verification entrypoint:
+
+```bash
+./scripts/verify.sh --list
+./scripts/verify.sh quick
+./scripts/verify.sh full
+```
+
+Record blocked work explicitly with `aiwf-task-state ... BLOCKED --reason ...`.
+Do not push, merge, tag, publish, release, access secrets, or use real session
+data without the task-specific human approval required by `AGENTS.md`.
+
 ## Local Checks
 
 Before opening a PR:
