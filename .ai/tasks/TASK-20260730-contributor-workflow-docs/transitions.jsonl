@@ -6,3 +6,4 @@
 {"at":"2026-07-30T21:17:10+0800","from":"PLAN_APPROVED","to":"IN_PROGRESS","actor":"codex","reason":"sole Writer started documentation change"}
 {"at":"2026-07-30T21:19:32+0800","from":"IN_PROGRESS","to":"SELF_CHECKED","actor":"codex","reason":"audit, quick, full, diff, and path checks passed"}
 {"at":"2026-07-30T21:19:32+0800","from":"SELF_CHECKED","to":"IN_REVIEW","actor":"codex","reason":"committed evidence prepared for Claude review"}
+{"at":"2026-07-30T21:21:23+0800","from":"IN_REVIEW","to":"BLOCKED","actor":"codex","reason":"Claude Code authMethod is none; independent review cannot run"}

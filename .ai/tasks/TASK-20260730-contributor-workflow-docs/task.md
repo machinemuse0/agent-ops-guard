@@ -3,15 +3,15 @@ id: TASK-20260730-contributor-workflow-docs
 title: contributor workflow docs
 type: docs
 risk: R1
-status: IN_REVIEW
-status_before_block: null
+status: BLOCKED
+status_before_block: IN_REVIEW
 owner: human
 planner: human
 writer: codex
 reviewer: claude
 base_branch: chore/dual-ai-workflow-v1
 created_at: 2026-07-30T21:16:20+0800
-updated_at: 2026-07-30T21:19:32+0800
+updated_at: 2026-07-30T21:21:23+0800
 ---
 
 # Task — contributor workflow docs

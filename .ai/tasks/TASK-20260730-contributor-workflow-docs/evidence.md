@@ -43,4 +43,4 @@ Summary: 117 passed; release gates and isolated wheel self-check behaved as expe
 - [x] Diff contains no unrelated product changes.
 - [x] No rollback is required beyond reverting the documentation commit.
 - [x] No production, network, financial, on-chain, push, merge, tag, or release action.
-- Status: SELF_CHECKED_PENDING_REVIEW
+- Status: BLOCKED_BY_CLAUDE_AUTH
