@@ -1,7 +1,7 @@
 version: 1
 project:
   name: "ai-coding-cost-guard"
-  status: "installed" # installed | operational | paused | archived
+  status: "operational" # installed | operational | paused | archived
   default_risk: "R2"
   project_types: ["python-cli", "local-data", "privacy", "release-engineering"]
 

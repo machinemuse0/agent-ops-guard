@@ -71,4 +71,8 @@ Summary: no personal absolute-path matches.
 - [x] Diff contains no unrelated product changes.
 - [x] No rollback is required beyond reverting the documentation commit.
 - [x] No production, network, financial, on-chain, push, merge, tag, or release action.
-- Status: VERIFIED_AWAITING_HUMAN_READY_GATE
+- [x] Owner explicitly approved the `READY_TO_MERGE` workflow gate.
+- [x] Task reached `DONE`.
+- [x] `.ai/workflow.yaml` was promoted from `installed` to `operational` only
+  after the smoke task completed.
+- Status: DONE

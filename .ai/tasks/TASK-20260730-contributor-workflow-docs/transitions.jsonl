@@ -10,3 +10,5 @@
 {"at":"2026-07-30T21:33:54+0800","from":"BLOCKED","to":"IN_REVIEW","actor":"human","reason":"Claude authenticated"}
 {"at":"2026-07-30T22:04:10+0800","from":"IN_REVIEW","to":"APPROVED","actor":"claude","reason":"Independent review verdict APPROVE; two LOW findings remediated"}
 {"at":"2026-07-30T22:04:21+0800","from":"APPROVED","to":"VERIFIED","actor":"ci","reason":"Audit, quick, full, wheel smoke, and privacy-path checks passed"}
+{"at":"2026-07-30T22:31:30+0800","from":"VERIFIED","to":"READY_TO_MERGE","actor":"human","reason":"Owner explicitly approved both verified tasks for local completion"}
+{"at":"2026-07-30T22:31:37+0800","from":"READY_TO_MERGE","to":"DONE","actor":"codex","reason":"Reviewed documentation smoke task and all verification evidence completed"}
