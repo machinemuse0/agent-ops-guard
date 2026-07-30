@@ -11,3 +11,9 @@ build/
 dist/
 *.egg-info/
 .DS_Store
+
+# dual-ai workflow local state
+CLAUDE.local.md
+.ai/runtime/
+.ai/logs/
+.ai/tmp/

@@ -1,0 +1,50 @@
+version: 1
+project:
+  name: "ai-coding-cost-guard"
+  status: "installed" # installed | operational | paused | archived
+  default_risk: "R2"
+  project_types: ["python-cli", "local-data", "privacy", "release-engineering"]
+
+routing:
+  default_planner: "claude"
+  default_writer: "codex"
+  reviewer_policy: "other-vendor"
+  ui_writer: "adaptive"
+  max_full_review_cycles:
+    standard: 1
+    high_risk: 2
+  max_planning_rounds: 3
+  rescue_after_failed_attempts: 2
+
+verification:
+  entrypoint: "./scripts/verify.sh"
+  quick: "./scripts/verify.sh quick"
+  full: "./scripts/verify.sh full"
+  baseline_document: ".ai/migration/baseline.md"
+
+safety:
+  network_default: "deny"
+  dependency_install_requires_human: true
+  production_actions_require_human: true
+  financial_actions_require_human: true
+  onchain_writes_require_human: true
+  secret_access: "deny"
+  automatic_push: false
+  automatic_merge: false
+  automatic_deploy: false
+
+protected_paths:
+  - "aicg/db.py"
+  - "aicg/schemas/"
+  - "schemas/"
+  - "docs/stability.md"
+forbidden_commands:
+  - "git push"
+  - "git merge"
+  - "git tag"
+  - "python -m pip upload"
+  - "twine upload"
+external_services:
+  - "PyPI release (human only)"
+known_baseline_failures:
+  - "v1 readiness remains blocked until external beta, bug bar, and accuracy audit complete"
