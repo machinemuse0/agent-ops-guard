@@ -87,7 +87,8 @@ Use the repository verification entrypoint:
 ./scripts/verify.sh full
 ```
 
-Record blocked work explicitly with `aiwf-task-state ... BLOCKED --reason ...`.
+Record blocked work explicitly with
+`aiwf-task-state TASK-YYYYMMDD-slug BLOCKED --actor <human|codex|claude|ci> --reason "..."`.
 Do not push, merge, tag, publish, release, access secrets, or use real session
 data without the task-specific human approval required by `AGENTS.md`.
 

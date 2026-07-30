@@ -3,15 +3,15 @@ id: TASK-20260730-contributor-workflow-docs
 title: contributor workflow docs
 type: docs
 risk: R1
-status: BLOCKED
-status_before_block: IN_REVIEW
+status: VERIFIED
+status_before_block: null
 owner: human
 planner: human
 writer: codex
 reviewer: claude
 base_branch: chore/dual-ai-workflow-v1
 created_at: 2026-07-30T21:16:20+0800
-updated_at: 2026-07-30T21:21:23+0800
+updated_at: 2026-07-30T22:04:21+0800
 ---
 
 # Task — contributor workflow docs
@@ -47,12 +47,12 @@ entrypoint, but `CONTRIBUTING.md` still documents only the legacy local checks.
 
 ## Acceptance criteria
 
-- [ ] `CONTRIBUTING.md` names the task directory as the source of truth.
-- [ ] It documents one Writer and other-vendor independent review.
-- [ ] It includes accurate `aiwf-new-task`, `aiwf-task-state`, and
+- [x] `CONTRIBUTING.md` names the task directory as the source of truth.
+- [x] It documents one Writer and other-vendor independent review.
+- [x] It includes accurate `aiwf-new-task`, `aiwf-task-state`, and
       `./scripts/verify.sh --list|quick|full` commands.
-- [ ] It contains no personal absolute path or new product/release claim.
-- [ ] Audit, quick, and full verification preserve their existing results.
+- [x] It contains no personal absolute path or new product/release claim.
+- [x] Audit, quick, and full verification preserve their existing results.
 
 ## Constraints and invariants
 
@@ -82,4 +82,4 @@ commands could bypass workflow and release gates.
 
 ## Open questions
 
-- Claude review remains unavailable until the local CLI is authenticated.
+- None.

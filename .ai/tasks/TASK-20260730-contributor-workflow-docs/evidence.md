@@ -35,12 +35,40 @@ Summary: 117 passed; release gates and isolated wheel self-check behaved as expe
 ## Known baseline failures
 
 - v1 release readiness remains intentionally blocked by external beta/accuracy evidence.
-- Claude Code is not logged in, so cross-vendor review is pending.
+
+## Cross-vendor review
+
+- Reviewer: Claude, fresh read-only context.
+- Reviewed diff: `c21e6b0..353d36f`.
+- Verdict: `APPROVE`.
+- Findings: two `LOW`, both accepted and remediated exactly as recorded in
+  `resolution.md`.
+
+## Post-review remediation verification
+
+```text
+Command: aiwf-audit --format json .
+Exit code: 0
+Summary: failures=0; one expected dirty-worktree warning before commit.
+
+Command: ./scripts/verify.sh quick
+Exit code: 0
+Summary: 16 passed.
+
+Command: ./scripts/verify.sh full
+Exit code: 0
+Summary: 117 passed; both release-gate contracts remained blocked as expected;
+isolated wheel build/install and doctor self-check passed.
+
+Command: rg -n "/Users/${USER}/|/home/${USER}/" CONTRIBUTING.md implementation.md
+Exit code: 1
+Summary: no personal absolute-path matches.
+```
 
 ## Final state
 
-- [ ] No unresolved BLOCKER/HIGH findings: independent review not yet available.
+- [x] No unresolved BLOCKER/HIGH findings.
 - [x] Diff contains no unrelated product changes.
 - [x] No rollback is required beyond reverting the documentation commit.
 - [x] No production, network, financial, on-chain, push, merge, tag, or release action.
-- Status: BLOCKED_BY_CLAUDE_AUTH
+- Status: VERIFIED_AWAITING_HUMAN_READY_GATE

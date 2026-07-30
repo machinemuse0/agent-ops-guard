@@ -36,7 +36,7 @@ aiwf-audit --format json .
 ./scripts/verify.sh quick
 ./scripts/verify.sh full
 git diff --check
-rg -n "/Users/ssyuan|/home/" <reusable workflow and contributor files>
+rg -n "/Users/${USER}/|/home/${USER}/" <reusable workflow and contributor files>
 ```
 
 ## Baseline and results
@@ -49,11 +49,14 @@ rg -n "/Users/ssyuan|/home/" <reusable workflow and contributor files>
 ## Deviations from approved plan
 
 - The Owner-provided plan was used because Claude Code is not authenticated.
-- Claude independent review is still required before approval.
+- Claude independent review completed with `APPROVE` and two accepted `LOW`
+  findings; both received the minimal documentation fixes requested.
 
 ## Known limitations and unknowns
 
-- Cross-vendor review cannot run until Claude Code is authenticated.
+- The review covered task commit `353d36f`; the two post-review changes are
+  limited to the exact `LOW` remediation directions and receive deterministic
+  audit plus quick/full verification.
 
 ## Reviewer focus
 

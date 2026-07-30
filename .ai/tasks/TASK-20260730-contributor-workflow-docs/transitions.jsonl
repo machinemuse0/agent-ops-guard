@@ -7,3 +7,6 @@
 {"at":"2026-07-30T21:19:32+0800","from":"IN_PROGRESS","to":"SELF_CHECKED","actor":"codex","reason":"audit, quick, full, diff, and path checks passed"}
 {"at":"2026-07-30T21:19:32+0800","from":"SELF_CHECKED","to":"IN_REVIEW","actor":"codex","reason":"committed evidence prepared for Claude review"}
 {"at":"2026-07-30T21:21:23+0800","from":"IN_REVIEW","to":"BLOCKED","actor":"codex","reason":"Claude Code authMethod is none; independent review cannot run"}
+{"at":"2026-07-30T21:33:54+0800","from":"BLOCKED","to":"IN_REVIEW","actor":"human","reason":"Claude authenticated"}
+{"at":"2026-07-30T22:04:10+0800","from":"IN_REVIEW","to":"APPROVED","actor":"claude","reason":"Independent review verdict APPROVE; two LOW findings remediated"}
+{"at":"2026-07-30T22:04:21+0800","from":"APPROVED","to":"VERIFIED","actor":"ci","reason":"Audit, quick, full, wheel smoke, and privacy-path checks passed"}
