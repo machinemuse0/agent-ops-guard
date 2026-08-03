@@ -1,0 +1,8 @@
+{"at":"2026-08-03T22:46:00+0800","from":null,"to":"DRAFT","actor":"system","reason":"task created"}
+{"at":"2026-08-03T22:46:54+0800","from":"DRAFT","to":"TRIAGED","actor":"human","reason":"state transition"}
+{"at":"2026-08-03T22:46:54+0800","from":"TRIAGED","to":"PLANNED","actor":"codex","reason":"state transition"}
+{"at":"2026-08-03T22:46:54+0800","from":"PLANNED","to":"PLAN_CHALLENGED","actor":"codex","reason":"state transition"}
+{"at":"2026-08-03T22:46:54+0800","from":"PLAN_CHALLENGED","to":"PLAN_APPROVED","actor":"human","reason":"state transition"}
+{"at":"2026-08-03T22:46:55+0800","from":"PLAN_APPROVED","to":"IN_PROGRESS","actor":"codex","reason":"state transition"}
+{"at":"2026-08-03T22:49:19+0800","from":"IN_PROGRESS","to":"SELF_CHECKED","actor":"codex","reason":"state transition"}
+{"at":"2026-08-03T22:49:19+0800","from":"SELF_CHECKED","to":"IN_REVIEW","actor":"codex","reason":"state transition"}

@@ -41,7 +41,17 @@ script was corrected to isolate both provider homes and remove model CLIs from
 - No network, push, merge, tag, publish, production, financial, or on-chain
   operation was performed.
 
-## Review gate
+## Review and operational gate
 
-Cross-vendor review is pending because Claude Code is installed but not logged in.
-The project remains `installed`, not `operational`.
+- Claude authentication was restored after the initial migration attempt.
+- The real `TASK-20260730-contributor-workflow-docs` smoke task completed an
+  independent Claude review with verdict `APPROVE`; its two `LOW` findings were
+  remediated and deterministically re-verified.
+- That task reached `DONE`, and `.ai/workflow.yaml` was promoted from
+  `installed` to `operational` only after the smoke completed.
+- The versioned smoke-task artifacts record quick=16 and full=117 passing tests,
+  the review verdict, resolution, evidence, and state transitions.
+
+The workflow migration is therefore operational. This does not change release
+readiness: external beta, bug-bar, and 30-day accuracy evidence are still
+missing, so the v1 release gates remain intentionally blocked.
