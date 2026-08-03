@@ -10,6 +10,9 @@ Codex
 - Worktree: isolated temporary worktree
 - Base commit: `6114b9b73a256feb40414d642b8016b42d925f06`
 - Review candidate: committed `base..HEAD` diff supplied to the Reviewer
+- `task.md` `base_branch` names the intended integration target
+  (`release/v1.0`), while the change was authored on the Codex working branch
+  above.
 
 ## Files changed
 
@@ -50,7 +53,9 @@ changed-file allowlist review
 
 ## Deviations from approved plan
 
-- None.
+- None. After review, two accepted `LOW` clarity findings were addressed by
+  distinguishing the integration target from the working branch and labeling
+  the handoff's original migration file set.
 
 ## Known limitations and unknowns
 

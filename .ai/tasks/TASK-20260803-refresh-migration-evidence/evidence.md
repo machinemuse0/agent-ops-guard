@@ -56,10 +56,40 @@ Exit code: 0
 Summary: no superseded current-state wording; no product/protected-path change.
 ```
 
+## Cross-vendor review
+
+- Reviewer: Claude in a fresh, read-only context.
+- Reviewed diff: `6114b9b..06fcd5b`.
+- Verdict: `APPROVE`.
+- Findings: two `LOW`, both accepted with minimal documentation clarifications.
+- No BLOCKER, HIGH, or MEDIUM finding.
+
+## Post-review remediation verification
+
+```text
+Command: ./scripts/verify.sh quick
+Exit code: 0
+Summary: 16 passed in 27.25s.
+
+Command: ./scripts/verify.sh full
+Exit code: 0
+Summary: 117 passed in 34.62s; release-prep and target-1.0.0 remained blocked
+as expected; isolated wheel build/install and doctor self-check passed.
+
+Command: aiwf-audit --format json .
+Exit code: 0
+Summary: failures=0; one expected dirty-worktree warning before final commit.
+
+Command: git diff --check 6114b9b..HEAD plus focused stale-wording scan
+Exit code: 0
+Summary: no whitespace errors and no superseded current-state wording.
+```
+
 ## Final state
 
-- [ ] No unresolved BLOCKER/HIGH findings; pending independent review.
+- [x] No unresolved BLOCKER/HIGH findings.
 - [x] Diff contains no unrelated changes.
 - [x] Rollback is a documentation-only revert; R2/R3 handling is not applicable.
 - [x] Human approval for R3 is not applicable to this R1 task.
-- Status: SELF_CHECKED
+- [x] Task reached `DONE` after review and final verification.
+- Status: DONE

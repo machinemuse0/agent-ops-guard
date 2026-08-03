@@ -3,7 +3,7 @@ id: TASK-20260803-refresh-migration-evidence
 title: refresh migration evidence
 type: docs
 risk: R1
-status: IN_REVIEW
+status: DONE
 status_before_block: null
 owner: human
 planner: codex
@@ -11,7 +11,7 @@ writer: codex
 reviewer: claude
 base_branch: release/v1.0
 created_at: 2026-08-03T22:46:00+0800
-updated_at: 2026-08-03T22:49:19+0800
+updated_at: 2026-08-03T22:54:10+0800
 ---
 
 # Task — refresh migration evidence

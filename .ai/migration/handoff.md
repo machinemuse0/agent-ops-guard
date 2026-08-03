@@ -1,6 +1,9 @@
 # Workflow Migration Handoff
 
-## Files changed
+## Original migration file set
+
+The following paths were changed by the original workflow migration, not by the
+later documentation-status refresh:
 
 - Root `AGENTS.md`, `CLAUDE.md`, and `.gitignore`.
 - `.ai/` workflow config, templates, and migration evidence.

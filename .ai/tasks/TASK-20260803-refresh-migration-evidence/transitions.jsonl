@@ -6,3 +6,7 @@
 {"at":"2026-08-03T22:46:55+0800","from":"PLAN_APPROVED","to":"IN_PROGRESS","actor":"codex","reason":"state transition"}
 {"at":"2026-08-03T22:49:19+0800","from":"IN_PROGRESS","to":"SELF_CHECKED","actor":"codex","reason":"state transition"}
 {"at":"2026-08-03T22:49:19+0800","from":"SELF_CHECKED","to":"IN_REVIEW","actor":"codex","reason":"state transition"}
+{"at":"2026-08-03T22:52:32+0800","from":"IN_REVIEW","to":"APPROVED","actor":"claude","reason":"state transition"}
+{"at":"2026-08-03T22:54:09+0800","from":"APPROVED","to":"VERIFIED","actor":"ci","reason":"state transition"}
+{"at":"2026-08-03T22:54:09+0800","from":"VERIFIED","to":"READY_TO_MERGE","actor":"human","reason":"state transition"}
+{"at":"2026-08-03T22:54:10+0800","from":"READY_TO_MERGE","to":"DONE","actor":"codex","reason":"state transition"}
